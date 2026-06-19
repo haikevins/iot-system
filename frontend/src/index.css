@@ -1,0 +1,35 @@
+:root {
+  font-family: 'Inter', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  background: #0f2518;
+  position: relative;
+}
+
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  background:
+    linear-gradient(135deg, rgba(9, 26, 16, 0.56) 0%, rgba(9, 26, 16, 0.34) 100%),
+    url('/dashboard-background.png') center / cover no-repeat fixed;
+}
+
+#root {
+  min-height: 100vh;
+}
