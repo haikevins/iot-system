@@ -10,6 +10,9 @@ The project is designed as more than a basic sensor demo. Its main focus is **re
 
 https://github.com/user-attachments/assets/30f4c5b5-e922-4a45-a616-c7000f7c39c6
 
+https://github.com/user-attachments/assets/26a2878f-dba7-40f6-a78c-cde414e66af7
+
+
 ***
 
 ## Table of Contents
