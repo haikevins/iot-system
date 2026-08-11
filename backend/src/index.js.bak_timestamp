@@ -11,7 +11,8 @@ const config = {
   mqttUrl: process.env.MQTT_URL || 'mqtt://127.0.0.1:1883',
   mqttUser: process.env.MQTT_USER || '',
   mqttPassword: process.env.MQTT_PASSWORD || '',
-  mqttClientId: process.env.MQTT_CLIENT_ID || 'backend-influx-01',
+  mqttClientId:
+    process.env.MQTT_CLIENT_ID || `backend-influx-${Math.random().toString(16).slice(2, 8)}`,
   corsOrigin: process.env.CORS_ORIGIN || '*',
   influxUrl: process.env.INFLUX_URL,
   influxToken: process.env.INFLUX_TOKEN,
@@ -32,7 +33,6 @@ const latestByNode = {};
 const recentTelemetryByNode = new Map();
 const MQTT_DUPLICATE_WINDOW_MS = 30000;
 let lastMqttMessageAt = null;
-let mqttSessionPresent = false;
 let duplicateMqttMessageCount = 0;
 
 app.use(
@@ -61,8 +61,7 @@ const mqttClient = mqtt.connect(config.mqttUrl, {
   username: config.mqttUser,
   password: config.mqttPassword,
   clientId: config.mqttClientId,
-  clean: false,
-  protocolVersion: 4,
+  clean: true,
   reconnectPeriod: 2000,
   connectTimeout: 5000
 });
@@ -97,7 +96,6 @@ function parseTelemetryPayload(topic, payloadBuffer) {
   const status = payload?.status;
   const temperatureValid = payload?.tempValid;
   const temperature = payload?.temp;
-  const sampleAgeMs = payload?.ageMs;
 
   if (!Number.isInteger(sequence) || sequence < 0 || sequence > 255) {
     throw new Error(`Invalid seq for ${topic}`);
@@ -119,16 +117,11 @@ function parseTelemetryPayload(topic, payloadBuffer) {
     throw new Error(`tempValid=false requires temp=null for ${topic}`);
   }
 
-  if (!Number.isInteger(sampleAgeMs) || sampleAgeMs < 0 || sampleAgeMs > 0xffffffff) {
-    throw new Error(`Invalid ageMs for ${topic}`);
-  }
-
   return {
     sequence,
     status,
     temperatureValid,
-    temperature: temperatureValid ? Number(temperature) : null,
-    sampleAgeMs
+    temperature: temperatureValid ? Number(temperature) : null
   };
 }
 
@@ -162,11 +155,7 @@ function isDuplicateTelemetry(node, telemetry, receivedAt) {
   return false;
 }
 
-function calculateSampledAt(receivedAt, sampleAgeMs) {
-  return new Date(receivedAt.getTime() - sampleAgeMs);
-}
-
-function updateLatest(node, telemetry, sampledAt, receivedAt) {
+function updateLatest(node, telemetry, receivedAt) {
   const previousState = latestByNode[node] || {};
 
   latestByNode[node] = {
@@ -175,25 +164,21 @@ function updateLatest(node, telemetry, sampledAt, receivedAt) {
     temp_avg: telemetry.temperatureValid ? telemetry.temperature : null,
     tempValid: telemetry.temperatureValid,
     status: telemetry.status,
-    sampleAgeMs: telemetry.sampleAgeMs,
-    sampledAt: sampledAt.toISOString(),
-    lastSeenAt: sampledAt.toISOString(),
-    lastReceivedAt: receivedAt.toISOString(),
-    statusUpdatedAt: sampledAt.toISOString(),
+    lastSeenAt: receivedAt.toISOString(),
+    statusUpdatedAt: receivedAt.toISOString(),
     tempUpdatedAt: telemetry.temperatureValid
-      ? sampledAt.toISOString()
+      ? receivedAt.toISOString()
       : previousState.tempUpdatedAt || null
   };
 }
 
-function writeTelemetryPoint(node, telemetry, sampledAt) {
+function writeTelemetryPoint(node, telemetry, receivedAt) {
   const point = new Point('node_metrics')
     .tag('node', node)
     .intField('seq', telemetry.sequence)
     .intField('status', telemetry.status)
-    .intField('age_ms', telemetry.sampleAgeMs)
     .booleanField('temp_valid', telemetry.temperatureValid)
-    .timestamp(sampledAt);
+    .timestamp(receivedAt);
 
   if (telemetry.temperatureValid) {
     point.floatField('temp_avg', telemetry.temperature);
@@ -214,7 +199,6 @@ function handleMessage(topic, payloadBuffer) {
   try {
     const telemetry = parseTelemetryPayload(topic, payloadBuffer);
     const receivedAt = new Date();
-    const sampledAt = calculateSampledAt(receivedAt, telemetry.sampleAgeMs);
 
     if (isDuplicateTelemetry(node, telemetry, receivedAt)) {
       duplicateMqttMessageCount += 1;
@@ -222,8 +206,8 @@ function handleMessage(topic, payloadBuffer) {
       return;
     }
 
-    updateLatest(node, telemetry, sampledAt, receivedAt);
-    writeTelemetryPoint(node, telemetry, sampledAt);
+    updateLatest(node, telemetry, receivedAt);
+    writeTelemetryPoint(node, telemetry, receivedAt);
 
     lastMqttMessageAt = receivedAt.toISOString();
   } catch (error) {
@@ -231,13 +215,8 @@ function handleMessage(topic, payloadBuffer) {
   }
 }
 
-mqttClient.on('connect', (connack) => {
-  mqttSessionPresent = Boolean(connack?.sessionPresent);
-
-  console.log(
-    `Connected to MQTT broker: ${config.mqttUrl} ` +
-      `(persistent session, sessionPresent=${mqttSessionPresent})`
-  );
+mqttClient.on('connect', () => {
+  console.log(`Connected to MQTT broker: ${config.mqttUrl}`);
 
   mqttClient.subscribe(telemetryTopic, { qos: 1 }, (error) => {
     if (error) {
@@ -258,9 +237,6 @@ app.get('/health', (_request, response) => {
   response.json({
     status: 'ok',
     mqttConnected: mqttClient.connected,
-    mqttPersistentSession: true,
-    mqttSessionPresent,
-    mqttClientId: config.mqttClientId,
     lastMessageAt: lastMqttMessageAt,
     influxBucket: config.influxBucket,
     duplicateMqttMessageCount

@@ -77,7 +77,6 @@ struct TelemetryMessage
     uint8_t sequence;
     int16_t temperatureCentiCelsius;
     uint8_t status;
-    uint32_t capturedAtMs;
 };
 
 esp_mqtt_client_handle_t g_mqttClient = nullptr;
@@ -516,8 +515,7 @@ static bool InitializeMqttClient(void)
 /**
  * @brief  Enqueues one telemetry object for MQTT QoS 1 delivery.
  * @note   Topic format: iot/<node>/telemetry.
- * @note   Payload contains seq, temp, tempValid, status and ageMs in one JSON object.
- * @note   ageMs is the elapsed time since the DATA frame was accepted from the STM32 node.
+ * @note   Payload contains seq, temp, tempValid and status in one JSON object.
  * @note   The message remains pending until MQTT_EVENT_PUBLISHED confirms broker PUBACK.
  * @param  message: Telemetry message to enqueue.
  * @retval Positive MQTT message ID on success, or -1 on failure.
@@ -532,8 +530,7 @@ static int EnqueueTelemetryQos1(const TelemetryMessage &message)
     }
 
     char telemetryTopic[40];
-    char telemetryPayload[160];
-    const uint32_t sampleAgeMs = (uint32_t)(millis() - message.capturedAtMs);
+    char telemetryPayload[128];
 
     snprintf(telemetryTopic,
         sizeof(telemetryTopic),
@@ -544,10 +541,9 @@ static int EnqueueTelemetryQos1(const TelemetryMessage &message)
     {
         snprintf(telemetryPayload,
             sizeof(telemetryPayload),
-            "{\"seq\":%u,\"temp\":null,\"tempValid\":false,\"status\":%u,\"ageMs\":%lu}",
+            "{\"seq\":%u,\"temp\":null,\"tempValid\":false,\"status\":%u}",
             message.sequence,
-            message.status,
-            (unsigned long)sampleAgeMs);
+            message.status);
     }
     else
     {
@@ -570,11 +566,10 @@ static int EnqueueTelemetryQos1(const TelemetryMessage &message)
 
         snprintf(telemetryPayload,
             sizeof(telemetryPayload),
-            "{\"seq\":%u,\"temp\":%s,\"tempValid\":true,\"status\":%u,\"ageMs\":%lu}",
+            "{\"seq\":%u,\"temp\":%s,\"tempValid\":true,\"status\":%u}",
             message.sequence,
             temperatureText,
-            message.status,
-            (unsigned long)sampleAgeMs);
+            message.status);
     }
 
     const int mqttMessageId = esp_mqtt_client_enqueue(g_mqttClient,
@@ -602,22 +597,19 @@ static int EnqueueTelemetryQos1(const TelemetryMessage &message)
  * @param  address: Node address.
  * @param  temperatureCentiCelsius: Signed temperature multiplied by 100.
  * @param  status: Six-bit sensor fault mask.
- * @param  capturedAtMs: Gateway uptime timestamp when the DATA frame was accepted.
  * @retval 1 when queued successfully, otherwise 0.
  */
 static bool EnqueueTelemetry(uint8_t address,
     uint8_t sequence,
     int16_t temperatureCentiCelsius,
-    uint8_t status,
-    uint32_t capturedAtMs)
+    uint8_t status)
 {
     TelemetryMessage message =
     {
         address,
         sequence,
         temperatureCentiCelsius,
-        status,
-        capturedAtMs
+        status
     };
 
     if (xQueueSend(g_telemetryQueue, &message, 0) != pdPASS)
@@ -826,13 +818,11 @@ static void LoraTask(void *parameter)
                 const int16_t temperatureCentiCelsius =
                     DecodeTemperatureCentiCelsius(packet.data);
                 const uint8_t status = (uint8_t)(packet.data[2] & 0x3FU);
-                const uint32_t capturedAtMs = millis();
 
                 const bool queued = EnqueueTelemetry(currentNodeAddress,
                     currentSequence,
                     temperatureCentiCelsius,
-                    status,
-                    capturedAtMs);
+                    status);
 
                 if (!queued)
                 {
