@@ -1,16 +1,31 @@
 #include "systick_driver.h"
 
-static volatile uint32_t tick_ms = 0;
+static volatile uint32_t s_tickCountMs = 0U;
 
-void SysTick_Init(void) {
+/**
+ * @brief  Configures SysTick to generate an interrupt every 1 ms.
+ * @retval None
+ */
+void SysTick_Init(void)
+{
     SystemCoreClockUpdate();
-    SysTick_Config(SystemCoreClock / 1000);
+    SysTick_Config(SystemCoreClock / 1000U);
 }
 
-void SysTick_Handler(void) {
-    tick_ms++;
+/**
+ * @brief  SysTick interrupt handler that increments the millisecond counter.
+ * @retval None
+ */
+void SysTick_Handler(void)
+{
+    s_tickCountMs++;
 }
 
-uint32_t SysTick_GetTick(void) {
-    return tick_ms;
+/**
+ * @brief  Returns the current millisecond tick count.
+ * @retval Milliseconds elapsed since SysTick initialization.
+ */
+uint32_t SysTick_GetTick(void)
+{
+    return s_tickCountMs;
 }

@@ -1,54 +1,162 @@
 #include "sx1278.h"
 #include "adc_driver.h"
+#include "systick_driver.h"
 #include "systick_utils.h"
-#include <string.h>
 
-volatile uint32_t okCount = 0;
-volatile uint32_t failCount = 0;
-volatile uint32_t txFailCount = 0;
-volatile uint32_t ackTimeoutCount = 0;
+#define NODE_RECEIVE_TIMEOUT_MS             2000U
+#define DATA_TRANSMIT_TIMEOUT_MS            1000U
+#define ACK_WAIT_TIMEOUT_MS                 250U
+#define DATA_TRANSMIT_MAX_ATTEMPTS          3U
+#define TEMPERATURE_PAYLOAD_LENGTH          3U
+#define TEMPERATURE_SCALE                   100.0f
+#define TEMPERATURE_INVALID_CENTI_C         ((int16_t)-32768)
 
+volatile uint32_t g_successfulTransactionCount = 0U;
+volatile uint32_t g_transmitFailureCount = 0U;
+volatile uint32_t g_ackTimeoutCount = 0U;
+volatile uint32_t g_retryExhaustedCount = 0U;
+
+/**
+ * @brief  Converts temperature in degrees Celsius to signed centi-degrees.
+ * @note   The value 0x8000 is reserved as an invalid-temperature marker.
+ * @param  temperatureCelsius: Temperature in degrees Celsius.
+ * @retval Signed temperature multiplied by 100, or 0x8000 when out of range.
+ */
+static int16_t EncodeTemperatureCentiCelsius(float temperatureCelsius)
+{
+    float scaledTemperature;
+
+    if ((temperatureCelsius < -327.67f) ||
+        (temperatureCelsius > 327.67f))
+    {
+        return TEMPERATURE_INVALID_CENTI_C;
+    }
+
+    scaledTemperature = temperatureCelsius * TEMPERATURE_SCALE;
+
+    if (scaledTemperature >= 0.0f)
+    {
+        scaledTemperature += 0.5f;
+    }
+    else
+    {
+        scaledTemperature -= 0.5f;
+    }
+
+    return (int16_t)scaledTemperature;
+}
+
+/**
+ * @brief  Waits for an ACK that matches the current node and sequence number.
+ * @param  sequence: Sequence number of the DATA packet being acknowledged.
+ * @retval 1 when a matching ACK is received before timeout, otherwise 0.
+ */
+static _Bool WaitForAcknowledgement(uint8_t sequence)
+{
+    uint32_t startTimeMs = millis();
+
+    while ((millis() - startTimeMs) < ACK_WAIT_TIMEOUT_MS)
+    {
+        LoraPacket_t packet;
+        uint32_t elapsedTimeMs = millis() - startTimeMs;
+        uint32_t remainingTimeMs = ACK_WAIT_TIMEOUT_MS - elapsedTimeMs;
+
+        if (!SX1278_ReceivePacket(&packet, remainingTimeMs))
+        {
+            return 0;
+        }
+
+        if ((packet.addr == SX1278_ADDR) &&
+            (packet.type == SX1278_TYPE_ACK) &&
+            (packet.seq == sequence) &&
+            (packet.len == 0U))
+        {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+/**
+ * @brief  Sends one DATA packet and retries when the matching ACK is not received.
+ * @param  sequence: Sequence number copied from the gateway POLL packet.
+ * @param  payload: Three-byte temperature/status payload.
+ * @retval 1 when the transaction is acknowledged, otherwise 0.
+ */
+static _Bool SendTemperatureWithRetry(uint8_t sequence,
+    const uint8_t payload[TEMPERATURE_PAYLOAD_LENGTH])
+{
+    uint8_t attemptIndex;
+
+    for (attemptIndex = 0U;
+         attemptIndex < DATA_TRANSMIT_MAX_ATTEMPTS;
+         attemptIndex++)
+    {
+        if (!SX1278_SendPacket(SX1278_ADDR,
+            SX1278_TYPE_TEMPERATURE,
+            sequence,
+            payload,
+            TEMPERATURE_PAYLOAD_LENGTH,
+            DATA_TRANSMIT_TIMEOUT_MS))
+        {
+            g_transmitFailureCount++;
+            continue;
+        }
+
+        if (WaitForAcknowledgement(sequence))
+        {
+            g_successfulTransactionCount++;
+            return 1;
+        }
+
+        g_ackTimeoutCount++;
+    }
+
+    g_retryExhaustedCount++;
+    return 0;
+}
+
+/**
+ * @brief  Waits for gateway POLL packets and returns temperature DATA with ACK/retry.
+ * @note   Protocol format is START | ADDR | TYPE | SEQ | LEN | DATA | CRC8.
+ * @retval Never returns.
+ */
 int main(void)
 {
     SysTick_Init();
     SX1278_Init();
-
     ADC_GPIO_Init();
     ADC_DMA_Init();
 
     while (1)
     {
-        LoraPacket_t packet;
-			
-				SX1278_WriteReg(REG_OPMODE, 0x8D);
+        LoraPacket_t receivedPacket;
+        float averageTemperatureCelsius;
+        int16_t encodedTemperature;
+        uint8_t sensorStatusMask;
+        uint8_t transmitPayload[TEMPERATURE_PAYLOAD_LENGTH];
 
-        // ===== WAIT POLL =====
-        if (!SX1278_ReceivePacket(&packet, 2000))
+        if (!SX1278_ReceivePacket(&receivedPacket, NODE_RECEIVE_TIMEOUT_MS))
+        {
             continue;
+        }
 
-        if (packet.addr != SX1278_ADDR)
+        if ((receivedPacket.addr != SX1278_ADDR) ||
+            (receivedPacket.type != SX1278_TYPE_POLL) ||
+            (receivedPacket.len != 0U))
+        {
             continue;
+        }
 
-        if (packet.type != SX1278_TYPE_POLL)
-            continue;
+        averageTemperatureCelsius = ADC_GetStableAverageTemp();
+        sensorStatusMask = (uint8_t)(ADC_GetStatusBitmask() & 0x3FU);
+        encodedTemperature = EncodeTemperatureCentiCelsius(averageTemperatureCelsius);
 
-        // ===== READ SENSOR =====
-        float temp = ADC_GetStableAverageTemp();
-        uint8_t status = ADC_GetStatusBitmask();
+        transmitPayload[0] = (uint8_t)((uint16_t)encodedTemperature & 0x00FFU);
+        transmitPayload[1] = (uint8_t)(((uint16_t)encodedTemperature >> 8U) & 0x00FFU);
+        transmitPayload[2] = sensorStatusMask;
 
-        uint8_t txData[5];
-        memcpy(txData, &temp, 4);
-        txData[4] = status;
-
-        // ===== SEND DATA =====
-        SX1278_SendPacket(
-            SX1278_ADDR,
-            SX1278_TYPE_TEMPERATURE,
-            txData,
-            5,
-            1000
-        );
-				
-				SX1278_WriteReg(REG_OPMODE, 0x8D);
+        SendTemperatureWithRetry(receivedPacket.seq, transmitPayload);
     }
 }
