@@ -8,8 +8,7 @@ The project is designed as more than a basic sensor demo. Its main focus is **re
 
 ## Demo Video
 
-[web-demo-laptop.webm](https://github.com/user-attachments/assets/84d7e778-deef-428d-a108-2e672d58b863)
-https://github.com/user-attachments/assets/f5f5f92c-5e0a-44dd-9f65-22dccb12de5f
+https://github.com/user-attachments/assets/30f4c5b5-e922-4a45-a616-c7000f7c39c6
 
 ***
 
