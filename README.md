@@ -8,8 +8,8 @@ The project is designed as more than a basic sensor demo. Its main focus is **re
 
 ## Demo Video
 
-/home/hai/Documents/Project/iot-system/docs/videos/demo-web-mobile.mp4
-/home/hai/Documents/Project/iot-system/docs/videos/web-demo-laptop.webm
+[web-demo-laptop.webm](https://github.com/user-attachments/assets/84d7e778-deef-428d-a108-2e672d58b863)
+https://github.com/user-attachments/assets/f5f5f92c-5e0a-44dd-9f65-22dccb12de5f
 
 ***
 
