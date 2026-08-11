@@ -10,6 +10,12 @@
 #include <time.h>
 #include <sys/time.h>
 
+#if __has_include("secrets.h")
+#include "secrets.h"
+#else
+#error "Missing gateway/include/secrets.h. Copy secrets.example.h to secrets.h and configure local credentials."
+#endif
+
 #define LORA_SS_PIN                        27
 #define LORA_RESET_PIN                     14
 #define LORA_DIO0_PIN                      26
@@ -83,14 +89,6 @@ static const uint8_t s_nodeAddresses[] =
 };
 
 #define NUM_NODES (sizeof(s_nodeAddresses) / sizeof(s_nodeAddresses[0]))
-
-const char *WIFI_SSID = "Tung Tung Tung";
-const char *WIFI_PASSWORD = "04062004";
-const char *MQTT_BROKER = "172.20.10.4";
-const uint16_t MQTT_PORT = 1883U;
-const char *MQTT_USER = "gateway-01";
-const char *MQTT_PASSWORD = "ngochai2004";
-const char *MQTT_CLIENT_ID = "esp32-gateway-01";
 
 struct ProtocolPacket
 {
