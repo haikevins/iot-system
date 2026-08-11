@@ -164,6 +164,7 @@ function parseTelemetryPayload(topic, payloadBuffer) {
     payload?.faultDetailValid ?? Array.isArray(sensorFaults);
   const sampledAtMs = payload?.sampledAtMs ?? null;
   const sampleAgeMs = payload?.ageMs ?? null;
+  const rssiDbm = payload?.rssiDbm ?? payload?.rssi ?? null;
   const timestampValid = payload?.timestampValid ?? true;
   const recovered = payload?.recovered ?? false;
 
@@ -224,6 +225,11 @@ function parseTelemetryPayload(topic, payloadBuffer) {
     throw new Error(`Invalid ageMs for ${topic}`);
   }
 
+  if (rssiDbm !== null &&
+      (!Number.isInteger(rssiDbm) || rssiDbm < -200 || rssiDbm > 50)) {
+    throw new Error(`Invalid rssiDbm for ${topic}`);
+  }
+
   if (typeof timestampValid !== 'boolean') {
     throw new Error(`Invalid timestampValid for ${topic}`);
   }
@@ -247,6 +253,7 @@ function parseTelemetryPayload(topic, payloadBuffer) {
     temperature: temperatureValid ? Number(temperature) : null,
     sampledAtMs,
     sampleAgeMs,
+    rssiDbm,
     timestampValid,
     recovered
   };
@@ -652,6 +659,7 @@ function updateLatest(node, telemetry, sampledAt, receivedAt) {
     faultDetailValid: telemetry.faultDetailValid,
     faults: telemetry.sensorFaults,
     sampleAgeMs: telemetry.sampleAgeMs,
+    rssiDbm: telemetry.rssiDbm,
     sampledAt: sampledAt.toISOString(),
     lastSeenAt: sampledAt.toISOString(),
     lastReceivedAt: receivedAt.toISOString(),
@@ -690,6 +698,10 @@ function writeTelemetryPoint(node, telemetry, sampledAt) {
     point.intField('age_ms', telemetry.sampleAgeMs);
   }
 
+  if (telemetry.rssiDbm !== null) {
+    point.intField('rssi_dbm', telemetry.rssiDbm);
+  }
+
   if (telemetry.faultDetailValid) {
     telemetry.sensorFaults.forEach((faultCode, sensorIndex) => {
       point.intField(`fault_s${sensorIndex + 1}`, faultCode);
@@ -723,6 +735,10 @@ function writeRecoveredUnstampedPoint(node, telemetry, receivedAt) {
 
   if (legacyRecordId !== null) {
     point.intField('record_id', legacyRecordId);
+  }
+
+  if (telemetry.rssiDbm !== null) {
+    point.intField('rssi_dbm', telemetry.rssiDbm);
   }
 
   if (telemetry.faultDetailValid) {

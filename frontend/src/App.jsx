@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import PropTypes from 'prop-types';
 import {
+  Brush,
   CartesianGrid,
-  Legend,
   Line,
   LineChart,
   ResponsiveContainer,
@@ -15,13 +15,19 @@ import {
   AlertTriangle,
   BarChart3,
   CircleHelp,
+  Clock,
   Cpu,
+  Database,
   LayoutDashboard,
   LogOut,
+  Menu,
+  Radio,
   RefreshCw,
+  RotateCcw,
   Search,
   Server,
   Settings,
+  SlidersHorizontal,
   Thermometer,
   Wifi,
   WifiOff,
@@ -32,39 +38,42 @@ import './App.css';
 const API_BASE_URL =
   import.meta.env.VITE_API_BASE_URL ||
   `${window.location.protocol}//${window.location.hostname}:3000`;
+
 const NODE_IDS = ['node01', 'node02', 'node03'];
 const SENSOR_IDS = [0, 1, 2, 3, 4, 5];
 const POLL_INTERVAL_MS = 2000;
 const HISTORY_REFRESH_MS = 5000;
-const HISTORY_RANGE_MINUTES = 15;
-const HISTORY_WINDOW_SECONDS = 5;
 const OFFLINE_TIMEOUT_MS_RAW = Number(import.meta.env.VITE_NODE_OFFLINE_MS || 12000);
 const OFFLINE_TIMEOUT_MS = Number.isFinite(OFFLINE_TIMEOUT_MS_RAW)
   ? OFFLINE_TIMEOUT_MS_RAW
   : 12000;
+
+const HISTORY_RANGES = [
+  { label: '15m', minutes: 15, windowSeconds: 5 },
+  { label: '1h', minutes: 60, windowSeconds: 5 },
+  { label: '6h', minutes: 360, windowSeconds: 30 },
+  { label: '24h', minutes: 1440, windowSeconds: 120 }
+];
 
 const NODE_COLORS = {
   node01: '#0a8f60',
   node02: '#35b37e',
   node03: '#1e6a4c'
 };
-const MAIN_MENU_ITEMS = [
-  { label: 'Dashboard', icon: LayoutDashboard }
-];
+
+const MAIN_MENU_ITEMS = [{ label: 'Dashboard', icon: LayoutDashboard }];
 const GENERAL_MENU_ITEMS = [
   { label: 'Settings', icon: Settings },
   { label: 'Help', icon: CircleHelp },
   { label: 'Logout', icon: LogOut }
 ];
 
-
-function decodeSensorBits(statusByte) {
-  if (!Number.isInteger(statusByte)) {
-    return SENSOR_IDS.map(() => null);
-  }
-
-  return SENSOR_IDS.map((bit) => ((statusByte >> bit) & 0x01) === 1);
-}
+const FILTER_OPTIONS = [
+  { id: 'all', label: 'All' },
+  { id: 'online', label: 'Online' },
+  { id: 'offline', label: 'Offline' },
+  { id: 'fault', label: 'Fault' }
+];
 
 const COMMON_SENSOR_FAULT_LABELS = [
   [0x01, 'Short'],
@@ -75,6 +84,14 @@ const COMMON_SENSOR_FAULT_LABELS = [
   [0x40, 'Cross sensor'],
   [0x80, 'Model']
 ];
+
+function decodeSensorBits(statusByte) {
+  if (!Number.isInteger(statusByte)) {
+    return SENSOR_IDS.map(() => null);
+  }
+
+  return SENSOR_IDS.map((bit) => ((statusByte >> bit) & 0x01) === 1);
+}
 
 function decodeSensorFaultLabels(nodeId, faultCode) {
   if (!Number.isInteger(faultCode)) {
@@ -116,13 +133,16 @@ function formatNodeName(nodeId) {
   return nodeId.replace('node', 'Node ');
 }
 
-
 function isNodeOnline(lastSeenAt, nowMs) {
-  if (!lastSeenAt) return false;
+  if (!lastSeenAt) {
+    return false;
+  }
 
   const timestamp = Date.parse(lastSeenAt);
 
-  if (Number.isNaN(timestamp)) return false;
+  if (Number.isNaN(timestamp)) {
+    return false;
+  }
 
   return nowMs - timestamp <= OFFLINE_TIMEOUT_MS;
 }
@@ -134,7 +154,86 @@ function formatHistoryTime(value) {
     return value || '';
   }
 
-  return new Date(timestamp).toLocaleTimeString('en-GB', { hour12: false });
+  return new Date(timestamp).toLocaleTimeString('en-GB', {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false
+  });
+}
+
+function formatDuration(milliseconds) {
+  if (!Number.isFinite(milliseconds) || milliseconds < 0) {
+    return '--';
+  }
+
+  const seconds = Math.floor(milliseconds / 1000);
+
+  if (seconds < 5) {
+    return 'just now';
+  }
+
+  if (seconds < 60) {
+    return `${seconds}s`;
+  }
+
+  const minutes = Math.floor(seconds / 60);
+
+  if (minutes < 60) {
+    return `${minutes}m`;
+  }
+
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+
+  if (hours < 24) {
+    return remainingMinutes > 0 ? `${hours}h ${remainingMinutes}m` : `${hours}h`;
+  }
+
+  const days = Math.floor(hours / 24);
+  return `${days}d`;
+}
+
+function formatRelativeTimestamp(timestampValue, nowMs) {
+  if (!timestampValue) {
+    return 'No data';
+  }
+
+  const timestamp = Date.parse(timestampValue);
+
+  if (Number.isNaN(timestamp)) {
+    return 'No data';
+  }
+
+  const age = Math.max(0, nowMs - timestamp);
+  const formatted = formatDuration(age);
+  return formatted === 'just now' ? 'just now' : `${formatted} ago`;
+}
+
+function getFiniteNumber(...values) {
+  for (const value of values) {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return value;
+    }
+  }
+
+  return null;
+}
+
+function getNodeTone(node) {
+  if (!node.online) {
+    return 'offline';
+  }
+
+  if (node.faults > 0) {
+    return 'fault';
+  }
+
+  if (node.unknownSensors > 0) {
+    return 'unknown';
+  }
+
+  return 'ok';
 }
 
 function AnimatedNumber({
@@ -143,7 +242,7 @@ function AnimatedNumber({
   suffix = '',
   fallback = '--',
   className = '',
-  duration = 700
+  duration = 500
 }) {
   const [displayValue, setDisplayValue] = useState(() =>
     Number.isFinite(value) ? Number(value) : null
@@ -160,11 +259,6 @@ function AnimatedNumber({
     const target = Number(value);
     const from = previousValueRef.current;
     previousValueRef.current = target;
-
-    if (!Number.isFinite(from)) {
-      setDisplayValue(target);
-      return;
-    }
 
     let frameId = 0;
     const startedAt = performance.now();
@@ -205,14 +299,62 @@ AnimatedNumber.propTypes = {
   duration: PropTypes.number
 };
 
+function HealthItem({ icon: Icon, label, state, detail, tone }) {
+  return (
+    <div className={`health-item ${tone}`}>
+      <span className="health-item-icon" aria-hidden="true">
+        <Icon size={17} strokeWidth={2} />
+      </span>
+      <span className="health-item-copy">
+        <span>{label}</span>
+        <strong>{state}</strong>
+      </span>
+      {detail && <small>{detail}</small>}
+    </div>
+  );
+}
+
+HealthItem.propTypes = {
+  icon: PropTypes.elementType.isRequired,
+  label: PropTypes.string.isRequired,
+  state: PropTypes.string.isRequired,
+  detail: PropTypes.string,
+  tone: PropTypes.oneOf(['good', 'warn', 'bad', 'unknown']).isRequired
+};
+
 function App() {
   const [latestByNode, setLatestByNode] = useState({});
+  const [latestLoading, setLatestLoading] = useState(true);
   const [history, setHistory] = useState([]);
+  const [historyLoading, setHistoryLoading] = useState(true);
+  const [historyError, setHistoryError] = useState('');
+  const [historyReloadKey, setHistoryReloadKey] = useState(0);
+  const [historyRangeMinutes, setHistoryRangeMinutes] = useState(60);
+  const [chartResetKey, setChartResetKey] = useState(0);
+  const [visibleSeries, setVisibleSeries] = useState(() =>
+    Object.fromEntries(NODE_IDS.map((nodeId) => [nodeId, true]))
+  );
   const [lastError, setLastError] = useState('');
-  const [gatewayHealth, setGatewayHealth] = useState({ mqttConnected: false, lastMessageAt: null });
+  const [systemHealth, setSystemHealth] = useState({
+    mqttConnected: false,
+    lastMessageAt: null,
+    influxWorkerRunning: null,
+    lastInfluxWriteAt: null,
+    lastInfluxError: null,
+    outboxPendingCount: null
+  });
   const [search, setSearch] = useState('');
+  const [statusFilter, setStatusFilter] = useState('all');
   const [activeMenu, setActiveMenu] = useState('Dashboard');
   const [nowTick, setNowTick] = useState(Date.now());
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+
+  const selectedHistoryRange = useMemo(
+    () =>
+      HISTORY_RANGES.find((range) => range.minutes === historyRangeMinutes) ||
+      HISTORY_RANGES[1],
+    [historyRangeMinutes]
+  );
 
   useEffect(() => {
     let active = true;
@@ -225,11 +367,11 @@ function App() {
         ]);
 
         if (!latestResponse.ok) {
-          throw new Error(`HTTP ${latestResponse.status}`);
+          throw new Error(`Latest HTTP ${latestResponse.status}`);
         }
 
         if (!healthResponse.ok) {
-          throw new Error(`HTTP ${healthResponse.status}`);
+          throw new Error(`Health HTTP ${healthResponse.status}`);
         }
 
         const [latestPayload, healthPayload] = await Promise.all([
@@ -237,17 +379,32 @@ function App() {
           healthResponse.json()
         ]);
 
-        if (!active) return;
+        if (!active) {
+          return;
+        }
 
-        setLatestByNode(latestPayload);
-        setGatewayHealth({
+        setLatestByNode(latestPayload || {});
+        setSystemHealth({
           mqttConnected: healthPayload?.mqttConnected === true,
-          lastMessageAt: healthPayload?.lastMessageAt || null
+          lastMessageAt: healthPayload?.lastMessageAt || null,
+          influxWorkerRunning:
+            typeof healthPayload?.influxWorkerRunning === 'boolean'
+              ? healthPayload.influxWorkerRunning
+              : null,
+          lastInfluxWriteAt: healthPayload?.lastInfluxWriteAt || null,
+          lastInfluxError: healthPayload?.lastInfluxError || null,
+          outboxPendingCount: Number.isInteger(healthPayload?.outboxPendingCount)
+            ? healthPayload.outboxPendingCount
+            : null
         });
         setLastError('');
       } catch (error) {
         if (active) {
           setLastError(error instanceof Error ? error.message : 'Unable to fetch data');
+        }
+      } finally {
+        if (active) {
+          setLatestLoading(false);
         }
       }
     };
@@ -263,11 +420,18 @@ function App() {
 
   useEffect(() => {
     let active = true;
+    setHistoryLoading(true);
+    setHistoryError('');
+    setHistory([]);
 
-    const pullHistory = async () => {
+    const pullHistory = async (showLoading = false) => {
+      if (showLoading && active) {
+        setHistoryLoading(true);
+      }
+
       try {
         const response = await fetch(
-          `${API_BASE_URL}/history?minutes=${HISTORY_RANGE_MINUTES}&window=${HISTORY_WINDOW_SECONDS}`
+          `${API_BASE_URL}/history?minutes=${selectedHistoryRange.minutes}&window=${selectedHistoryRange.windowSeconds}`
         );
 
         if (!response.ok) {
@@ -276,29 +440,39 @@ function App() {
 
         const payload = await response.json();
 
-        if (!active) return;
+        if (!active) {
+          return;
+        }
 
         setHistory(Array.isArray(payload?.points) ? payload.points : []);
+        setHistoryError('');
       } catch (error) {
         if (active) {
-          console.error('Unable to fetch history:', error);
+          setHistoryError(
+            error instanceof Error ? error.message : 'Unable to fetch temperature history'
+          );
+        }
+      } finally {
+        if (active) {
+          setHistoryLoading(false);
         }
       }
     };
 
-    pullHistory();
-    const interval = window.setInterval(pullHistory, HISTORY_REFRESH_MS);
+    pullHistory(true);
+    const interval = window.setInterval(() => pullHistory(false), HISTORY_REFRESH_MS);
 
     return () => {
       active = false;
       window.clearInterval(interval);
     };
-  }, []);
+  }, [selectedHistoryRange, historyReloadKey]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
       setNowTick(Date.now());
     }, 1000);
+
     return () => window.clearInterval(timer);
   }, []);
 
@@ -332,6 +506,12 @@ function App() {
         );
         const faults = sensorFaultBits.filter((value) => value === true).length;
         const unknownSensors = sensorFaultBits.filter((value) => value === null).length;
+        const healthySensors = Math.max(0, SENSOR_IDS.length - faults - unknownSensors);
+        const rssi = getFiniteNumber(nodeData.rssi, nodeData.rssiDbm, nodeData.rssi_dbm);
+        const lastSeenTimestamp = Date.parse(nodeData.lastSeenAt || '');
+        const sampleAgeMs = Number.isFinite(lastSeenTimestamp)
+          ? Math.max(0, nowTick - lastSeenTimestamp)
+          : null;
 
         return {
           id: nodeId,
@@ -341,49 +521,64 @@ function App() {
           status,
           online,
           lastSeenAt: nodeData.lastSeenAt || null,
+          lastReceivedAt: nodeData.lastReceivedAt || null,
           tempUpdatedAt: nodeData.tempUpdatedAt || null,
+          rssi,
+          sampleAgeMs,
           sensorFaultBits,
           sensorFaultCodes,
           sensorFaultLabels,
           faultDetailKnown,
           faults,
-          unknownSensors
+          unknownSensors,
+          healthySensors
         };
       }),
     [latestByNode, nowTick]
   );
+
   const normalizedSearch = search.trim().toLowerCase();
 
   const filteredNodes = useMemo(() => {
-    if (!normalizedSearch) {
-      return nodeCards;
-    }
-
     return nodeCards.filter((node) => {
+      const statusMatches =
+        statusFilter === 'all' ||
+        (statusFilter === 'online' && node.online) ||
+        (statusFilter === 'offline' && !node.online) ||
+        (statusFilter === 'fault' && node.online && node.faults > 0);
+
+      if (!statusMatches) {
+        return false;
+      }
+
+      if (!normalizedSearch) {
+        return true;
+      }
+
       const numericId = Number(node.id.replace('node', ''));
-      const statusLabel = !node.online
-        ? 'offline'
-        : node.unknownSensors > 0
-          ? 'unknown'
-          : node.faults > 0
-            ? 'fault'
-            : 'online all good';
+      const tone = getNodeTone(node);
       const temperatureLabel =
         node.temp === null ? '' : `${node.temp.toFixed(2)} ${Math.round(node.temp)}`;
+      const faultLabels = node.sensorFaultLabels
+        .flatMap((labels) => (Array.isArray(labels) ? labels : []))
+        .join(' ');
       const searchableTerms = [
         node.id,
         formatNodeName(node.id),
         Number.isFinite(numericId) ? `node ${numericId}` : '',
         Number.isFinite(numericId) ? String(numericId) : '',
-        statusLabel,
-        temperatureLabel
+        tone,
+        node.online ? 'online' : 'offline',
+        node.faults > 0 ? 'fault' : '',
+        temperatureLabel,
+        faultLabels
       ]
         .join(' ')
         .toLowerCase();
 
       return searchableTerms.includes(normalizedSearch);
     });
-  }, [nodeCards, normalizedSearch]);
+  }, [nodeCards, normalizedSearch, statusFilter]);
 
   const totalFaults = useMemo(
     () => nodeCards.reduce((sum, node) => sum + node.faults, 0),
@@ -391,42 +586,121 @@ function App() {
   );
 
   const avgTemp = useMemo(() => {
-    const temps = nodeCards
+    const temperatures = nodeCards
       .filter((node) => node.online)
       .map((node) => node.temp)
-      .filter((temp) => temp !== null);
-    if (!temps.length) return null;
-    return temps.reduce((sum, temp) => sum + temp, 0) / temps.length;
+      .filter((temperature) => temperature !== null);
+
+    if (!temperatures.length) {
+      return null;
+    }
+
+    return temperatures.reduce((sum, temperature) => sum + temperature, 0) /
+      temperatures.length;
   }, [nodeCards]);
 
-  const totalSensors = NODE_IDS.length * SENSOR_IDS.length;
   const offlineNodes = nodeCards.filter((node) => !node.online).length;
   const activeNodes = nodeCards.filter((node) => node.online).length;
-  const lastMessageTimestamp = Date.parse(gatewayHealth.lastMessageAt || '');
+  const lastMessageTimestamp = Date.parse(systemHealth.lastMessageAt || '');
   const hasFreshGatewayMessage =
-    Number.isFinite(lastMessageTimestamp) && nowTick - lastMessageTimestamp <= OFFLINE_TIMEOUT_MS;
+    Number.isFinite(lastMessageTimestamp) &&
+    nowTick - lastMessageTimestamp <= OFFLINE_TIMEOUT_MS;
   const gatewayOnline =
-    !lastError && gatewayHealth.mqttConnected && (hasFreshGatewayMessage || activeNodes > 0);
-  const unknownSensors = nodeCards.reduce((sum, node) => sum + node.unknownSensors, 0);
-  const healthySensors = Math.max(0, totalSensors - totalFaults - unknownSensors);
-  const healthPercent = Math.round((healthySensors / totalSensors) * 100);
-  const healthTone = healthPercent >= 85 ? 'good' : healthPercent >= 60 ? 'warn' : 'bad';
-  const healthColor = healthTone === 'good' ? '#13865c' : healthTone === 'warn' ? '#d97706' : '#dc2626';
+    !lastError &&
+    systemHealth.mqttConnected &&
+    (hasFreshGatewayMessage || activeNodes > 0);
+  const backendHealthy = !lastError;
+  const influxKnown = typeof systemHealth.influxWorkerRunning === 'boolean';
+  const influxHealthy =
+    influxKnown &&
+    systemHealth.influxWorkerRunning === true &&
+    !systemHealth.lastInfluxError;
+
+  const freshestSampleAt = useMemo(() => {
+    const timestamps = [systemHealth.lastMessageAt, ...nodeCards.map((node) => node.lastSeenAt)]
+      .map((value) => Date.parse(value || ''))
+      .filter((value) => Number.isFinite(value));
+
+    if (!timestamps.length) {
+      return null;
+    }
+
+    return new Date(Math.max(...timestamps)).toISOString();
+  }, [nodeCards, systemHealth.lastMessageAt]);
+
+  const alerts = useMemo(() => {
+    const entries = [];
+
+    nodeCards.forEach((node) => {
+      if (!node.online) {
+        if (node.lastSeenAt && Number.isFinite(node.sampleAgeMs)) {
+          entries.push(`${formatNodeName(node.id)} offline for ${formatDuration(node.sampleAgeMs)}`);
+        } else {
+          entries.push(`${formatNodeName(node.id)} offline — no telemetry yet`);
+        }
+        return;
+      }
+
+      if (node.faults > 0) {
+        entries.push(
+          `${formatNodeName(node.id)} has ${node.faults} sensor fault${node.faults > 1 ? 's' : ''}`
+        );
+      }
+    });
+
+    return entries;
+  }, [nodeCards]);
+
+  const chartNodes = filteredNodes.filter((node) => visibleSeries[node.id]);
   const ActiveMenuIcon =
     [...MAIN_MENU_ITEMS, ...GENERAL_MENU_ITEMS].find((item) => item.label === activeMenu)?.icon ??
     LayoutDashboard;
 
+  const selectHistoryRange = (minutes) => {
+    setHistoryRangeMinutes(minutes);
+    setChartResetKey((value) => value + 1);
+  };
+
+  const toggleSeries = (nodeId) => {
+    setVisibleSeries((current) => ({
+      ...current,
+      [nodeId]: !current[nodeId]
+    }));
+  };
+
+  const handleMenuClick = (label) => {
+    setActiveMenu(label);
+    setSidebarOpen(false);
+  };
+
   return (
     <div className="layout-shell">
-      <aside className="sidebar">
+      {sidebarOpen && (
+        <button
+          type="button"
+          className="sidebar-backdrop"
+          aria-label="Close navigation"
+          onClick={() => setSidebarOpen(false)}
+        />
+      )}
+
+      <aside className={`sidebar${sidebarOpen ? ' mobile-open' : ''}`}>
         <div className="brand">
           <span className="brand-icon" aria-hidden="true">
-            <Cpu size={21} strokeWidth={2.1} />
+            <Cpu size={22} strokeWidth={2.1} />
           </span>
           <div className="brand-copy">
             <h2>IoT System</h2>
             <p>Temperature Monitoring</p>
           </div>
+          <button
+            type="button"
+            className="sidebar-close"
+            onClick={() => setSidebarOpen(false)}
+            aria-label="Close sidebar"
+          >
+            <X size={19} />
+          </button>
         </div>
 
         <div className="menu-section">
@@ -439,15 +713,14 @@ function App() {
                   key={item.label}
                   type="button"
                   className={`menu-item${activeMenu === item.label ? ' active' : ''}`}
-                  onClick={() => setActiveMenu(item.label)}
+                  onClick={() => handleMenuClick(item.label)}
                 >
                   <span className="menu-item-content">
                     <span className="menu-icon">
-                      <Icon size={16} strokeWidth={2} />
+                      <Icon size={17} strokeWidth={2} />
                     </span>
                     <span>{item.label}</span>
                   </span>
-                  {item.badge && <span className="menu-badge">{item.badge}</span>}
                 </button>
               );
             })}
@@ -464,11 +737,11 @@ function App() {
                   key={item.label}
                   type="button"
                   className={`menu-item${activeMenu === item.label ? ' active' : ''}`}
-                  onClick={() => setActiveMenu(item.label)}
+                  onClick={() => handleMenuClick(item.label)}
                 >
                   <span className="menu-item-content">
                     <span className="menu-icon">
-                      <Icon size={16} strokeWidth={2} />
+                      <Icon size={17} strokeWidth={2} />
                     </span>
                     <span>{item.label}</span>
                   </span>
@@ -481,294 +754,506 @@ function App() {
 
       <main className="dashboard">
         <header className="topbar">
-          <div className="search-box">
-            <Search className="search-icon" size={19} strokeWidth={2} aria-hidden="true" />
-            <input
-              value={search}
-              onChange={(event) => setSearch(event.target.value)}
-              placeholder="Search Node 01, node02, online..."
-              aria-label="Search nodes"
-            />
-            {normalizedSearch && (
-              <span className="search-result-count" aria-live="polite">
-                {filteredNodes.length}/{nodeCards.length}
-              </span>
-            )}
-            {search && (
-              <button
-                type="button"
-                className="search-clear"
-                onClick={() => setSearch('')}
-                aria-label="Clear search"
-                title="Clear search"
-              >
-                <X size={17} strokeWidth={2.2} />
-              </button>
-            )}
-          </div>
+          <div className="topbar-main">
+            <button
+              type="button"
+              className="mobile-menu-btn"
+              onClick={() => setSidebarOpen(true)}
+              aria-label="Open navigation"
+            >
+              <Menu size={21} />
+            </button>
 
-          <div className="topbar-right">
-            <div className={`connection-pill ${gatewayOnline ? 'good' : 'bad'}`}>
-              {gatewayOnline ? (
-                <Wifi size={15} strokeWidth={2.2} aria-hidden="true" />
-              ) : (
-                <WifiOff size={15} strokeWidth={2.2} aria-hidden="true" />
+            <div className="search-box">
+              <Search className="search-icon" size={19} strokeWidth={2} aria-hidden="true" />
+              <input
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+                placeholder="Search nodes, status, faults..."
+                aria-label="Search nodes"
+              />
+              {normalizedSearch && (
+                <span className="search-result-count" aria-live="polite">
+                  {filteredNodes.length}/{nodeCards.length}
+                </span>
               )}
-              <span>Gateway {gatewayOnline ? 'Online' : 'Offline'}</span>
+              {search && (
+                <button
+                  type="button"
+                  className="search-clear"
+                  onClick={() => setSearch('')}
+                  aria-label="Clear search"
+                  title="Clear search"
+                >
+                  <X size={17} strokeWidth={2.2} />
+                </button>
+              )}
             </div>
           </div>
+
+          <div className="freshness-chip" title={freshestSampleAt || undefined}>
+            <Clock size={16} strokeWidth={2.1} aria-hidden="true" />
+            <span>Last update:</span>
+            <strong>{formatRelativeTimestamp(freshestSampleAt, nowTick)}</strong>
+          </div>
         </header>
-        <div className="search-dashboard-divider" />
+
         <div className="dashboard-body">
           <section className="heading-row">
             <div className="heading-copy">
               <h1 className="title-with-icon">
-                <ActiveMenuIcon size={22} strokeWidth={2.2} />
+                <span className="page-title-icon">
+                  <ActiveMenuIcon size={22} strokeWidth={2.2} />
+                </span>
                 <span>{activeMenu}</span>
               </h1>
               <p>Real-time node telemetry and sensor health</p>
             </div>
             <button className="refresh-btn" onClick={() => window.location.reload()}>
-              <RefreshCw size={15} strokeWidth={2.2} aria-hidden="true" />
+              <RefreshCw size={16} strokeWidth={2.2} aria-hidden="true" />
               <span>Refresh</span>
             </button>
           </section>
 
           {activeMenu === 'Dashboard' ? (
             <>
-              {lastError && <div className="error-banner">Backend connection error: {lastError}</div>}
+              {alerts.length > 0 && (
+                <section className="alert-banner" aria-live="polite">
+                  <AlertTriangle size={19} strokeWidth={2.2} />
+                  <div>
+                    <strong>Attention required</strong>
+                    <span>{alerts.slice(0, 3).join(' · ')}</span>
+                    {alerts.length > 3 && <small>+{alerts.length - 3} more</small>}
+                  </div>
+                </section>
+              )}
+
+              {lastError && (
+                <section className="error-banner">
+                  Backend connection error: {lastError}
+                </section>
+              )}
+
+              <section className="filter-toolbar">
+                <div className="filter-heading">
+                  <SlidersHorizontal size={16} strokeWidth={2} />
+                  <span>Filter</span>
+                </div>
+                <div className="filter-pills" role="group" aria-label="Filter nodes by status">
+                  {FILTER_OPTIONS.map((option) => (
+                    <button
+                      key={option.id}
+                      type="button"
+                      className={`filter-pill${statusFilter === option.id ? ' active' : ''}`}
+                      onClick={() => setStatusFilter(option.id)}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+                <span className="filter-result">
+                  {filteredNodes.length} of {nodeCards.length} nodes
+                </span>
+              </section>
 
               <section className="stat-grid">
                 <article className="stat-card highlight">
                   <h3 className="metric-title">
-                    <Server size={16} strokeWidth={2} />
+                    <Server size={17} strokeWidth={2} />
                     <span>Total Nodes</span>
                   </h3>
                   <p>
-                    <AnimatedNumber className="value-pop" value={NODE_IDS.length} />
+                    <AnimatedNumber value={NODE_IDS.length} />
                   </p>
                 </article>
                 <article className="stat-card">
                   <h3 className="metric-title">
-                    <Wifi size={16} strokeWidth={2} />
+                    <Wifi size={17} strokeWidth={2} />
                     <span>Online Nodes</span>
                   </h3>
                   <p>
-                    <AnimatedNumber className="value-pop" value={activeNodes} />
+                    <AnimatedNumber value={activeNodes} />
                   </p>
                 </article>
                 <article className="stat-card">
                   <h3 className="metric-title">
-                    <WifiOff size={16} strokeWidth={2} />
+                    <WifiOff size={17} strokeWidth={2} />
                     <span>Offline Nodes</span>
                   </h3>
                   <p>
-                    <AnimatedNumber className="value-pop" value={offlineNodes} />
+                    <AnimatedNumber value={offlineNodes} />
                   </p>
                 </article>
                 <article className="stat-card">
                   <h3 className="metric-title">
-                    <Thermometer size={16} strokeWidth={2} />
+                    <Thermometer size={17} strokeWidth={2} />
                     <span>Average Temp</span>
                   </h3>
                   <p>
-                    <AnimatedNumber className="value-pop" value={avgTemp} decimals={2} suffix="°C" />
+                    <AnimatedNumber value={avgTemp} decimals={2} suffix="°C" />
                   </p>
                 </article>
                 <article className="stat-card">
                   <h3 className="metric-title">
-                    <AlertTriangle size={16} strokeWidth={2} />
+                    <AlertTriangle size={17} strokeWidth={2} />
                     <span>Fault Sensors</span>
                   </h3>
                   <p>
-                    <AnimatedNumber className="value-pop" value={totalFaults} />
+                    <AnimatedNumber value={totalFaults} />
                   </p>
                 </article>
               </section>
 
+              <section className="system-health-strip" aria-label="System health">
+                <HealthItem
+                  icon={Wifi}
+                  label="Gateway"
+                  state={gatewayOnline ? 'Online' : 'Offline'}
+                  tone={gatewayOnline ? 'good' : 'bad'}
+                />
+                <HealthItem
+                  icon={Radio}
+                  label="MQTT"
+                  state={systemHealth.mqttConnected ? 'Connected' : 'Disconnected'}
+                  tone={systemHealth.mqttConnected ? 'good' : 'bad'}
+                />
+                <HealthItem
+                  icon={Server}
+                  label="Backend"
+                  state={backendHealthy ? 'Healthy' : 'Unavailable'}
+                  tone={backendHealthy ? 'good' : 'bad'}
+                />
+                <HealthItem
+                  icon={Database}
+                  label="InfluxDB"
+                  state={
+                    !influxKnown ? 'Unknown' : influxHealthy ? 'Healthy' : 'Degraded'
+                  }
+                  detail={
+                    Number.isInteger(systemHealth.outboxPendingCount) &&
+                    systemHealth.outboxPendingCount > 0
+                      ? `${systemHealth.outboxPendingCount} pending`
+                      : undefined
+                  }
+                  tone={!influxKnown ? 'unknown' : influxHealthy ? 'good' : 'warn'}
+                />
+              </section>
+
               <section className="content-grid">
-                <article className="panel chart-panel live-panel">
-                  <div className="panel-head">
-                    <h2 className="panel-title-with-icon">
-                      <BarChart3 size={17} strokeWidth={2} />
-                      <span>Temperature</span>
-                    </h2>
-                  </div>
-                  <ResponsiveContainer width="100%" height={270}>
-                    <LineChart data={history} margin={{ top: 12, right: 16, left: -4, bottom: 0 }}>
-                      <defs>
-                        {NODE_IDS.map((nodeId) => (
-                          <linearGradient id={`tempLine-${nodeId}`} key={nodeId} x1="0" y1="0" x2="1" y2="0">
-                            <stop offset="0%" stopColor={NODE_COLORS[nodeId]} stopOpacity="0.65" />
-                            <stop offset="100%" stopColor={NODE_COLORS[nodeId]} stopOpacity="1" />
-                          </linearGradient>
+                <article className="panel chart-panel">
+                  <div className="panel-head chart-panel-head">
+                    <div>
+                      <h2 className="panel-title-with-icon">
+                        <BarChart3 size={18} strokeWidth={2} />
+                        <span>Temperature</span>
+                      </h2>
+                      <p className="panel-subtitle">Historical temperature by node</p>
+                    </div>
+                    <div className="chart-actions">
+                      <div className="range-switch" role="group" aria-label="Temperature time range">
+                        {HISTORY_RANGES.map((range) => (
+                          <button
+                            key={range.minutes}
+                            type="button"
+                            className={historyRangeMinutes === range.minutes ? 'active' : ''}
+                            onClick={() => selectHistoryRange(range.minutes)}
+                          >
+                            {range.label}
+                          </button>
                         ))}
-                      </defs>
-                      <CartesianGrid strokeDasharray="4 4" stroke="#e6ebea" />
-                      <XAxis dataKey="time" minTickGap={26} stroke="#8aa19a" tickFormatter={formatHistoryTime} />
-                      <YAxis stroke="#8aa19a" unit="°C" />
-                      <Tooltip
-                        contentStyle={{
-                          background: '#ffffff',
-                          border: '1px solid #dde5e2',
-                          borderRadius: '12px'
-                        }}
-                        formatter={(value) =>
-                          value === null || value === undefined ? 'N/A' : `${Number(value).toFixed(2)} °C`
-                        }
-                      
-                        labelFormatter={formatHistoryTime}
-                      />
-                      <Legend />
-                      {filteredNodes.map((node) => {
-                        const nodeId = node.id;
-                        return (
-                      <Line
-                        key={nodeId}
-                        type="monotone"
-                        dataKey={nodeId}
-                        name={formatNodeName(nodeId)}
-                        stroke={`url(#tempLine-${nodeId})`}
-                        strokeWidth={3}
-                        dot={false}
-                        activeDot={{ r: 4, strokeWidth: 2, stroke: '#ffffff' }}
-                        connectNulls={false}
-                        isAnimationActive={true}
-                        animationDuration={700}
-                        animationEasing="ease-out"
-                      />
-                        );
-                      })}
-                    </LineChart>
-                  </ResponsiveContainer>
+                      </div>
+                      <button
+                        type="button"
+                        className="chart-reset-btn"
+                        onClick={() => setChartResetKey((value) => value + 1)}
+                        title="Reset chart zoom"
+                      >
+                        <RotateCcw size={16} />
+                        <span>Reset zoom</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="series-legend" aria-label="Toggle chart nodes">
+                    {filteredNodes.map((node) => (
+                      <button
+                        key={node.id}
+                        type="button"
+                        className={`series-toggle${visibleSeries[node.id] ? ' active' : ''}`}
+                        style={{ '--series-color': NODE_COLORS[node.id] }}
+                        onClick={() => toggleSeries(node.id)}
+                        aria-pressed={visibleSeries[node.id]}
+                      >
+                        <span className="series-swatch" />
+                        {formatNodeName(node.id)}
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="chart-frame">
+                    {historyLoading ? (
+                      <div className="chart-skeleton" aria-label="Loading temperature history">
+                        <span />
+                        <span />
+                        <span />
+                        <span />
+                      </div>
+                    ) : historyError && history.length === 0 ? (
+                      <div className="chart-state error">
+                        <AlertTriangle size={26} />
+                        <strong>History unavailable</strong>
+                        <span>{historyError}</span>
+                        <button
+                          type="button"
+                          onClick={() => setHistoryReloadKey((value) => value + 1)}
+                        >
+                          Retry
+                        </button>
+                      </div>
+                    ) : history.length === 0 ? (
+                      <div className="chart-state">
+                        <BarChart3 size={26} />
+                        <strong>No history data</strong>
+                        <span>No valid samples in the selected range.</span>
+                      </div>
+                    ) : chartNodes.length === 0 ? (
+                      <div className="chart-state">
+                        <Search size={26} />
+                        <strong>No visible node series</strong>
+                        <span>Clear the search/filter or enable a node from the legend.</span>
+                      </div>
+                    ) : (
+                      <ResponsiveContainer width="100%" height={340}>
+                        <LineChart
+                          data={history}
+                          margin={{ top: 16, right: 18, left: 0, bottom: 8 }}
+                        >
+                          <CartesianGrid strokeDasharray="4 4" stroke="#dfe8e4" />
+                          <XAxis
+                            dataKey="time"
+                            minTickGap={34}
+                            stroke="#789087"
+                            tickFormatter={formatHistoryTime}
+                          />
+                          <YAxis stroke="#789087" unit="°C" width={48} />
+                          <Tooltip
+                            contentStyle={{
+                              background: '#ffffff',
+                              border: '1px solid #d9e4df',
+                              borderRadius: '14px',
+                              boxShadow: '0 14px 30px rgba(15, 23, 42, 0.12)'
+                            }}
+                            formatter={(value, name) => [
+                              value === null || value === undefined
+                                ? 'N/A'
+                                : `${Number(value).toFixed(2)} °C`,
+                              name
+                            ]}
+                            labelFormatter={(value) => `Time ${formatHistoryTime(value)}`}
+                          />
+                          {chartNodes.map((node) => (
+                            <Line
+                              key={node.id}
+                              type="monotone"
+                              dataKey={node.id}
+                              name={formatNodeName(node.id)}
+                              stroke={NODE_COLORS[node.id]}
+                              strokeWidth={2.8}
+                              dot={false}
+                              activeDot={{ r: 4, strokeWidth: 2, stroke: '#ffffff' }}
+                              connectNulls={false}
+                              isAnimationActive={false}
+                            />
+                          ))}
+                          <Brush
+                            key={`${chartResetKey}-${historyRangeMinutes}`}
+                            dataKey="time"
+                            height={26}
+                            travellerWidth={8}
+                            stroke="#0a8f60"
+                            fill="#f5faf7"
+                            tickFormatter={formatHistoryTime}
+                          />
+                        </LineChart>
+                      </ResponsiveContainer>
+                    )}
+                  </div>
+                  {historyError && history.length > 0 && (
+                    <div className="chart-inline-warning">
+                      <AlertTriangle size={15} /> Showing cached history — refresh failed.
+                    </div>
+                  )}
                 </article>
 
                 <article className="panel node-panel">
                   <div className="panel-head">
-                    <h2 className="panel-title-with-icon">
-                      <Cpu size={17} strokeWidth={2} />
-                      <span>Node Status</span>
-                    </h2>
+                    <div>
+                      <h2 className="panel-title-with-icon">
+                        <Cpu size={18} strokeWidth={2} />
+                        <span>Node Status</span>
+                      </h2>
+                      <p className="panel-subtitle">Live state, freshness and sensor summary</p>
+                    </div>
                   </div>
-                  <div className="node-list">
-                    {filteredNodes.length === 0 && (
-                      <div className="empty-search-state">
-                        No nodes match “{search.trim()}”.
-                      </div>
-                    )}
-                    {filteredNodes.map((node, index) => {
-                      const tone = !node.online
-                        ? 'offline'
-                        : node.unknownSensors > 0
-                          ? 'unknown'
-                          : node.faults > 0
-                            ? 'fault'
-                            : 'ok';
-                      return (
-                      <div
-                        className={`node-row ${tone}`}
-                        key={node.id}
-                        style={{ '--row-delay': `${index * 45}ms` }}
-                      >
-                        <div className="row-left">
-                          <span className={`node-dot ${tone}`} />
-                          <strong>{formatNodeName(node.id)}</strong>
+
+                  {latestLoading ? (
+                    <div className="node-card-grid">
+                      {NODE_IDS.map((nodeId) => (
+                        <div className="node-card skeleton-card" key={nodeId}>
+                          <span />
+                          <span />
+                          <span />
                         </div>
-                        <div className="row-right">
-                          <span>{node.online && node.temp !== null ? `${node.temp.toFixed(2)}°C` : '--'}</span>
-                          <em className={tone}>
-                            {!node.online
-                              ? 'Offline'
-                              : node.unknownSensors > 0
-                                ? 'Unknown'
-                                : node.faults > 0
-                                  ? `${node.faults} faults`
-                                  : 'All good'}
-                          </em>
-                        </div>
-                      </div>
-                      );
-                    })}
-                  </div>
+                      ))}
+                    </div>
+                  ) : filteredNodes.length === 0 ? (
+                    <div className="empty-search-state">
+                      No nodes match the current search and status filter.
+                    </div>
+                  ) : (
+                    <div className="node-card-grid">
+                      {filteredNodes.map((node) => {
+                        const tone = getNodeTone(node);
+                        const statusLabel =
+                          tone === 'offline'
+                            ? 'OFFLINE'
+                            : tone === 'fault'
+                              ? 'FAULT'
+                              : tone === 'unknown'
+                                ? 'UNKNOWN'
+                                : 'ONLINE';
+
+                        return (
+                          <article className={`node-card ${tone}`} key={node.id}>
+                            <div className="node-card-head">
+                              <div>
+                                <span className="node-card-kicker">Telemetry node</span>
+                                <h3>{formatNodeName(node.id)}</h3>
+                              </div>
+                              <span className={`node-status-pill ${tone}`}>{statusLabel}</span>
+                            </div>
+
+                            <div className="node-temperature">
+                              <span>Temperature</span>
+                              <strong>
+                                {node.online && node.temp !== null
+                                  ? `${node.temp.toFixed(2)} °C`
+                                  : '-- °C'}
+                              </strong>
+                            </div>
+
+                            <div className="node-meta-grid">
+                              <div>
+                                <span className="node-meta-label">
+                                  <Radio size={15} /> RSSI
+                                </span>
+                                <strong title={node.rssi === null ? 'RSSI is not exposed by the current backend payload.' : undefined}>
+                                  {node.rssi === null ? '-- dBm' : `${Math.round(node.rssi)} dBm`}
+                                </strong>
+                              </div>
+                              <div>
+                                <span className="node-meta-label">
+                                  <Clock size={15} /> Last sample
+                                </span>
+                                <strong>
+                                  {node.sampleAgeMs === null
+                                    ? '--'
+                                    : formatRelativeTimestamp(node.lastSeenAt, nowTick)}
+                                </strong>
+                              </div>
+                            </div>
+
+                            <div className="node-sensor-summary">
+                              <span>Sensors</span>
+                              <strong>
+                                {node.online
+                                  ? `${node.healthySensors}/${SENSOR_IDS.length} OK`
+                                  : '--'}
+                              </strong>
+                            </div>
+                          </article>
+                        );
+                      })}
+                    </div>
+                  )}
                 </article>
 
                 <article className="panel sensor-panel">
                   <div className="panel-head">
-                    <h2 className="panel-title-with-icon">
-                      <Thermometer size={17} strokeWidth={2} />
-                      <span>Sensor Status</span>
-                    </h2>
-                  </div>
-                  <div className="sensor-scroll">
-                    {filteredNodes.length === 0 && (
-                      <div className="empty-search-state">
-                        No sensor groups match “{search.trim()}”.
-                      </div>
-                    )}
-                    {filteredNodes.map((node, nodeIndex) => (
-                      <div className="sensor-node" key={node.id} style={{ '--node-delay': `${nodeIndex * 70}ms` }}>
-                        <div className="sensor-node-head">
-                          <strong>{formatNodeName(node.id)}</strong>
-                        </div>
-                        <div className="sensor-grid">
-                          {SENSOR_IDS.map((sensorId) => {
-                            const isFault = node.sensorFaultBits[sensorId];
-                            const unknown = isFault === null;
-                            const detailedLabels = node.sensorFaultLabels[sensorId];
-                            const faultSummary =
-                              isFault && Array.isArray(detailedLabels)
-                                ? formatSensorFaultSummary(detailedLabels)
-                                : isFault
-                                  ? 'Fault'
-                                  : 'OK';
-                            const faultTitle =
-                              isFault && Array.isArray(detailedLabels) && detailedLabels.length > 0
-                                ? detailedLabels.join(', ')
-                                : undefined;
-
-                            return (
-                              <div
-                                className={`sensor-chip ${unknown ? 'unknown' : isFault ? 'fault' : 'ok'}`}
-                                key={sensorId}
-                                style={{ '--chip-delay': `${sensorId * 45}ms` }}
-                                title={faultTitle}
-                              >
-                                <span>S{sensorId + 1}</span>
-                                <b>{unknown ? 'Unknown' : faultSummary}</b>
-                              </div>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </article>
-
-                <article className={`panel progress-panel ${healthTone}`}>
-                  <div className="panel-head">
-                    <h2 className="panel-title-with-icon">
-                      <Activity size={17} strokeWidth={2} />
-                      <span>System Health</span>
-                    </h2>
-                  </div>
-                  <div
-                    className={`gauge ${healthTone}`}
-                    style={{
-                      background: `conic-gradient(${healthColor} ${healthPercent * 3.6}deg, #e1ebe7 0deg)`
-                    }}
-                  >
-                    <div className="gauge-inner">
-                      <strong>
-                        <AnimatedNumber className="value-pop" value={healthPercent} suffix="%" />
-                      </strong>
+                    <div>
+                      <h2 className="panel-title-with-icon">
+                        <Thermometer size={18} strokeWidth={2} />
+                        <span>Sensor Status</span>
+                      </h2>
+                      <p className="panel-subtitle">Detailed fault state for six sensors per node</p>
                     </div>
                   </div>
+
+                  {latestLoading ? (
+                    <div className="sensor-skeleton-grid">
+                      {NODE_IDS.map((nodeId) => (
+                        <div className="sensor-skeleton" key={nodeId} />
+                      ))}
+                    </div>
+                  ) : filteredNodes.length === 0 ? (
+                    <div className="empty-search-state">
+                      No sensor groups match the current search and status filter.
+                    </div>
+                  ) : (
+                    <div className="sensor-scroll">
+                      {filteredNodes.map((node) => (
+                        <div className="sensor-node" key={node.id}>
+                          <div className="sensor-node-head">
+                            <strong>{formatNodeName(node.id)}</strong>
+                            <span>
+                              {node.online
+                                ? `${node.healthySensors}/${SENSOR_IDS.length} OK`
+                                : 'Offline'}
+                            </span>
+                          </div>
+                          <div className="sensor-grid">
+                            {SENSOR_IDS.map((sensorId) => {
+                              const isFault = node.sensorFaultBits[sensorId];
+                              const unknown = isFault === null;
+                              const detailedLabels = node.sensorFaultLabels[sensorId];
+                              const faultSummary =
+                                isFault && Array.isArray(detailedLabels)
+                                  ? formatSensorFaultSummary(detailedLabels)
+                                  : isFault
+                                    ? 'Fault'
+                                    : 'OK';
+                              const faultTitle =
+                                isFault &&
+                                Array.isArray(detailedLabels) &&
+                                detailedLabels.length > 0
+                                  ? detailedLabels.join(', ')
+                                  : undefined;
+
+                              return (
+                                <div
+                                  className={`sensor-chip ${
+                                    unknown ? 'unknown' : isFault ? 'fault' : 'ok'
+                                  }`}
+                                  key={sensorId}
+                                  title={faultTitle}
+                                >
+                                  <span>S{sensorId + 1}</span>
+                                  <b>{unknown ? 'Unknown' : faultSummary}</b>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </article>
               </section>
             </>
           ) : (
             <section className="placeholder-panel">
               <div>
+                <Activity size={28} />
                 <h2>Coming soon</h2>
                 <p>Section is under construction.</p>
               </div>

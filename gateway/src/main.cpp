@@ -165,7 +165,7 @@ struct TelemetryMessage
     uint8_t sensorFaults[SENSOR_COUNT];
     uint8_t faultDetailValid;
     uint8_t nodeSampleAgeValid;
-    uint16_t reserved;
+    int16_t rssiDbm;
     uint32_t capturedAtMs;
     uint32_t nodeSampleAgeMs;
     uint64_t captureBootNonce;
@@ -1773,9 +1773,10 @@ static int EnqueueTelemetryQos1(const PersistentTelemetryRecord &record)
     }
 
     char telemetryTopic[40];
-    char telemetryPayload[512];
+    char telemetryPayload[576];
     char timestampText[32];
     char ageText[24];
+    char rssiText[16];
     char faultArrayText[64];
     const bool recovered = message.captureBootNonce != s_bootNonce;
     const uint64_t currentUnixMs = GetUnixTimeMs();
@@ -1844,6 +1845,19 @@ static int EnqueueTelemetryQos1(const PersistentTelemetryRecord &record)
         snprintf(ageText, sizeof(ageText), "null");
     }
 
+    if (message.rssiDbm != 0)
+    {
+        snprintf(rssiText,
+            sizeof(rssiText),
+            "%d",
+            (int)message.rssiDbm);
+    }
+    else
+    {
+        /* Pre-RSSI v10 records used this two-byte slot as zeroed padding. */
+        snprintf(rssiText, sizeof(rssiText), "null");
+    }
+
     if (message.faultDetailValid != 0U)
     {
         snprintf(faultArrayText,
@@ -1894,6 +1908,7 @@ static int EnqueueTelemetryQos1(const PersistentTelemetryRecord &record)
         sizeof(telemetryPayload),
         "{\"id\":\"%s\",\"seq\":%u,\"temp\":%s,\"tempValid\":%s,"
         "\"status\":%u,\"faultDetailValid\":%s,\"faults\":%s,"
+        "\"rssiDbm\":%s,"
         "\"sampledAtMs\":%s,\"ageMs\":%s,"
         "\"timestampValid\":%s,\"recovered\":%s}",
         record.recordId,
@@ -1905,6 +1920,7 @@ static int EnqueueTelemetryQos1(const PersistentTelemetryRecord &record)
         message.status,
         message.faultDetailValid != 0U ? "true" : "false",
         faultArrayText,
+        rssiText,
         timestampText,
         ageText,
         timestampValid ? "true" : "false",
@@ -1939,6 +1955,7 @@ static int EnqueueTelemetryQos1(const PersistentTelemetryRecord &record)
  * @param  status: Six-bit sensor fault summary mask.
  * @param  sensorFaults: Six detailed fault-code bytes.
  * @param  faultDetailValid: true when detailed fault bytes are available.
+ * @param  rssiDbm: RSSI measured by the Gateway for this DATA frame in dBm.
  * @param  capturedAtMs: Gateway uptime timestamp when the DATA frame was accepted.
  * @param  nodeSampleAgeMs: Age reported by STM32 from ADC-burst midpoint to TX.
  * @param  nodeSampleAgeValid: true when the DATA payload contains sample age.
@@ -1950,6 +1967,7 @@ static bool PersistTelemetry(uint8_t address,
     uint8_t status,
     const uint8_t sensorFaults[SENSOR_COUNT],
     bool faultDetailValid,
+    int16_t rssiDbm,
     uint32_t capturedAtMs,
     uint32_t nodeSampleAgeMs,
     bool nodeSampleAgeValid)
@@ -1961,6 +1979,7 @@ static bool PersistTelemetry(uint8_t address,
     message.status = status;
     message.faultDetailValid = faultDetailValid ? 1U : 0U;
     message.nodeSampleAgeValid = nodeSampleAgeValid ? 1U : 0U;
+    message.rssiDbm = rssiDbm;
     message.nodeSampleAgeMs = nodeSampleAgeMs;
     message.capturedAtMs = capturedAtMs;
     message.captureBootNonce = s_bootNonce;
@@ -2255,6 +2274,7 @@ static void LoraTask(void *parameter)
                 }
 
                 const uint32_t capturedAtMs = millis();
+                const int16_t packetRssiDbm = (int16_t)LoRa.packetRssi();
 
                 const bool persisted = PersistTelemetry(currentNodeAddress,
                     currentSequence,
@@ -2262,6 +2282,7 @@ static void LoraTask(void *parameter)
                     status,
                     sensorFaults,
                     faultDetailValid,
+                    packetRssiDbm,
                     capturedAtMs,
                     nodeSampleAgeMs,
                     nodeSampleAgeValid);
@@ -2285,7 +2306,7 @@ static void LoraTask(void *parameter)
                         faultDetailValid ? "yes" : "no",
                         nodeSampleAgeValid ? "" : "n/a:",
                         (unsigned long)nodeSampleAgeMs,
-                        LoRa.packetRssi());
+                        (int)packetRssiDbm);
                 }
                 else
                 {
@@ -2297,7 +2318,7 @@ static void LoraTask(void *parameter)
                         faultDetailValid ? "yes" : "no",
                         nodeSampleAgeValid ? "" : "n/a:",
                         (unsigned long)nodeSampleAgeMs,
-                        LoRa.packetRssi());
+                        (int)packetRssiDbm);
                 }
 
                 dataReceived = true;
