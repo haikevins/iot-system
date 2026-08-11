@@ -1420,3 +1420,1367 @@ input:focus-visible {
     scroll-behavior: auto !important;
   }
 }
+
+
+/* =========================================================
+   Settings & Help pages
+   ========================================================= */
+.utility-page {
+  display: grid;
+  gap: 18px;
+}
+
+.utility-intro {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 20px 22px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+  background: var(--surface-strong);
+  box-shadow: var(--shadow-card);
+}
+
+.utility-intro-icon {
+  width: 46px;
+  height: 46px;
+  flex: 0 0 46px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-icon);
+  color: #087552;
+  background: #eaf7f1;
+}
+
+.utility-eyebrow {
+  display: block;
+  margin-bottom: 4px;
+  color: #0a805b;
+  font-size: 0.74rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.utility-intro h2 {
+  margin: 0;
+  color: var(--slate-950);
+  font-size: 1.28rem;
+  letter-spacing: -0.02em;
+}
+
+.utility-intro p {
+  max-width: 760px;
+  margin: 6px 0 0;
+  color: var(--slate-600);
+  font-size: 0.94rem;
+  line-height: 1.6;
+}
+
+.utility-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.utility-card {
+  min-width: 0;
+  padding: 20px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--surface-strong);
+  box-shadow: var(--shadow-card);
+}
+
+.utility-card-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  margin-bottom: 16px;
+  color: #0a805b;
+}
+
+.utility-card-head > svg {
+  flex: 0 0 auto;
+  margin-top: 2px;
+}
+
+.utility-card-head h3 {
+  margin: 0;
+  color: var(--slate-950);
+  font-size: 1rem;
+}
+
+.utility-card-head p {
+  margin: 4px 0 0;
+  color: var(--slate-500);
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+.settings-list {
+  margin: 0;
+}
+
+.settings-list > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 11px 0;
+  border-bottom: 1px solid #edf2ef;
+}
+
+.settings-list > div:last-child {
+  border-bottom: 0;
+}
+
+.settings-list dt {
+  color: var(--slate-600);
+  font-size: 0.88rem;
+}
+
+.settings-list dd {
+  margin: 0;
+  color: var(--slate-950);
+  font-size: 0.91rem;
+  font-weight: 800;
+}
+
+.endpoint-box {
+  display: grid;
+  gap: 6px;
+  padding: 13px 14px;
+  border: 1px solid #dce9e3;
+  border-radius: var(--radius-control);
+  background: #f4faf7;
+}
+
+.endpoint-box span {
+  color: var(--slate-500);
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.endpoint-box code,
+.endpoint-list code,
+.config-file-list code,
+.command-grid code,
+.troubleshooting-list code {
+  font-family: "Ubuntu Mono", "Cascadia Mono", "DejaVu Sans Mono", monospace;
+}
+
+.endpoint-box code {
+  overflow-wrap: anywhere;
+  color: #075c42;
+  font-size: 0.84rem;
+}
+
+.endpoint-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.endpoint-list code {
+  padding: 7px 9px;
+  border-radius: 10px;
+  background: #eef4f1;
+  color: #35554a;
+  font-size: 0.78rem;
+}
+
+.reliability-flow,
+.help-flow {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.reliability-flow span,
+.help-flow span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 9px 10px;
+  border: 1px solid #dce9e3;
+  border-radius: 12px;
+  background: #f5faf7;
+  color: #28483c;
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.reliability-flow b,
+.help-flow b {
+  color: #8aa097;
+}
+
+.config-file-list,
+.troubleshooting-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.config-file-list {
+  display: grid;
+  gap: 10px;
+}
+
+.config-file-list li {
+  display: grid;
+  gap: 4px;
+  padding: 11px 12px;
+  border-radius: 12px;
+  background: #f6f9f7;
+}
+
+.config-file-list code {
+  color: #075c42;
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.config-file-list span {
+  color: var(--slate-500);
+  font-size: 0.79rem;
+}
+
+.settings-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 13px 15px;
+  border: 1px solid #efdcb5;
+  border-radius: var(--radius-control);
+  background: #fffaf0;
+  color: #77551c;
+  font-size: 0.84rem;
+  line-height: 1.5;
+}
+
+.settings-note svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
+.help-wide-card {
+  grid-column: 1 / -1;
+}
+
+.status-guide {
+  display: grid;
+  gap: 12px;
+}
+
+.status-guide > div {
+  display: grid;
+  grid-template-columns: 12px auto 1fr;
+  align-items: start;
+  column-gap: 9px;
+}
+
+.guide-dot {
+  width: 10px;
+  height: 10px;
+  margin-top: 5px;
+  border-radius: 999px;
+}
+
+.guide-dot.good { background: #10a56f; }
+.guide-dot.bad { background: #d55454; }
+.guide-dot.warn { background: #d59a31; }
+.guide-dot.unknown { background: #9aa7a1; }
+
+.status-guide strong {
+  color: var(--slate-800);
+  font-size: 0.86rem;
+}
+
+.status-guide p {
+  grid-column: 3;
+  margin: 0;
+  color: var(--slate-500);
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+
+.troubleshooting-list {
+  counter-reset: trouble;
+  display: grid;
+  gap: 10px;
+}
+
+.troubleshooting-list li {
+  position: relative;
+  display: grid;
+  gap: 3px;
+  padding: 11px 12px 11px 42px;
+  border-radius: 12px;
+  background: #f6f9f7;
+  counter-increment: trouble;
+}
+
+.troubleshooting-list li::before {
+  content: counter(trouble);
+  position: absolute;
+  left: 12px;
+  top: 11px;
+  width: 21px;
+  height: 21px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: #e5f4ed;
+  color: #087552;
+  font-size: 0.72rem;
+  font-weight: 900;
+}
+
+.troubleshooting-list strong {
+  color: var(--slate-800);
+  font-size: 0.84rem;
+}
+
+.troubleshooting-list span {
+  color: var(--slate-500);
+  font-size: 0.79rem;
+  line-height: 1.45;
+}
+
+.command-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+}
+
+.command-grid code {
+  min-width: 0;
+  overflow-x: auto;
+  padding: 10px 11px;
+  border-radius: 11px;
+  background: #10231d;
+  color: #d8f6e9;
+  font-size: 0.77rem;
+  white-space: nowrap;
+}
+
+@media (max-width: 900px) {
+  .utility-grid,
+  .command-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .help-wide-card {
+    grid-column: auto;
+  }
+}
+
+@media (max-width: 600px) {
+  .utility-intro,
+  .utility-card {
+    padding: 16px;
+  }
+
+  .utility-intro {
+    gap: 11px;
+  }
+
+  .utility-intro-icon {
+    width: 40px;
+    height: 40px;
+    flex-basis: 40px;
+  }
+
+  .utility-intro h2 {
+    font-size: 1.12rem;
+  }
+
+  .reliability-flow,
+  .help-flow {
+    align-items: stretch;
+  }
+
+  .reliability-flow span,
+  .help-flow span {
+    flex: 1 1 100%;
+    justify-content: center;
+  }
+
+  .reliability-flow b,
+  .help-flow b {
+    display: none;
+  }
+
+  .settings-list > div {
+    align-items: flex-start;
+  }
+}
+
+/* =========================================================
+   Interactive Settings v6
+   ========================================================= */
+html {
+  font-size: var(--app-font-size, 16px);
+}
+
+:root {
+  --chart-grid: #dfe8e4;
+  --chart-axis: #789087;
+  --chart-brush-fill: #f5faf7;
+  --chart-brush-stroke: #0a8f60;
+  --chart-active-dot-stroke: #ffffff;
+}
+
+.interactive-settings-page {
+  gap: 14px;
+}
+
+.settings-hero {
+  align-items: center;
+}
+
+.settings-hero-copy {
+  min-width: 0;
+  flex: 1;
+}
+
+.settings-reset-btn {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 40px;
+  padding: 0 13px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-control);
+  background: var(--surface-strong);
+  color: var(--slate-700);
+  font-weight: 750;
+  cursor: pointer;
+  transition: border-color 0.16s ease, transform 0.16s ease, background-color 0.16s ease;
+}
+
+.settings-reset-btn:hover {
+  transform: translateY(-1px);
+  border-color: #88b6a2;
+}
+
+.settings-live-note {
+  width: fit-content;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 11px;
+  border: 1px solid #d7e8df;
+  border-radius: var(--radius-pill);
+  background: #f2f9f5;
+  color: #4a655a;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.settings-save-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: #0da36d;
+  box-shadow: 0 0 0 4px rgba(13, 163, 109, 0.1);
+}
+
+.settings-control-grid {
+  align-items: start;
+}
+
+.settings-control-card {
+  display: grid;
+  gap: 0;
+}
+
+.setting-field,
+.setting-select-row {
+  padding: 14px 0;
+  border-top: 1px solid var(--border);
+}
+
+.settings-control-card .utility-card-head + .setting-field,
+.settings-control-card .utility-card-head + .setting-select-row {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.setting-field {
+  display: grid;
+  gap: 11px;
+}
+
+.setting-field-inline {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: 18px;
+}
+
+.setting-field-copy {
+  display: grid;
+  gap: 4px;
+}
+
+.setting-field-copy strong,
+.setting-select-row strong {
+  color: var(--slate-800);
+  font-size: 0.9rem;
+}
+
+.setting-field-copy span,
+.setting-select-row small {
+  color: var(--slate-500);
+  font-size: 0.79rem;
+  line-height: 1.45;
+}
+
+.setting-label-with-icon {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.segmented-setting {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
+  gap: 6px;
+  padding: 5px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--surface-muted);
+}
+
+.segmented-setting button {
+  min-height: 37px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 9px;
+  border: 1px solid transparent;
+  border-radius: 11px;
+  background: transparent;
+  color: var(--slate-600);
+  font-size: 0.8rem;
+  font-weight: 750;
+  cursor: pointer;
+}
+
+.segmented-setting button:hover {
+  background: rgba(16, 185, 129, 0.07);
+}
+
+.segmented-setting button.active {
+  border-color: #cce7da;
+  background: var(--surface-strong);
+  color: #087451;
+  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.06);
+}
+
+.setting-select-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 116px;
+  align-items: center;
+  gap: 16px;
+}
+
+.setting-select-row > span {
+  display: grid;
+  gap: 4px;
+}
+
+.setting-select-row select {
+  width: 100%;
+  min-height: 39px;
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  padding: 0 10px;
+  background: var(--surface-strong);
+  color: var(--slate-800);
+  font: inherit;
+  font-size: 0.83rem;
+  font-weight: 750;
+  cursor: pointer;
+}
+
+.setting-select-row select:focus-visible {
+  outline: 3px solid rgba(16, 185, 129, 0.16);
+  outline-offset: 2px;
+}
+
+.setting-select-row select:disabled {
+  opacity: 0.48;
+  cursor: not-allowed;
+}
+
+.switch-control {
+  position: relative;
+  min-width: 82px;
+  height: 38px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 7px;
+  padding: 0 10px 0 7px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-pill);
+  background: var(--surface-muted);
+  color: var(--slate-500);
+  cursor: pointer;
+}
+
+.switch-control > span {
+  width: 22px;
+  height: 22px;
+  position: absolute;
+  left: 7px;
+  border-radius: 999px;
+  background: #98a7a0;
+  transition: left 0.18s ease, background-color 0.18s ease;
+}
+
+.switch-control b {
+  margin-left: 29px;
+  font-size: 0.76rem;
+}
+
+.switch-control.on {
+  border-color: #b9dfce;
+  background: #eaf8f1;
+  color: #087451;
+}
+
+.switch-control.on > span {
+  left: calc(100% - 29px);
+  background: #0a9d69;
+}
+
+.switch-control.on b {
+  margin-left: 0;
+  margin-right: 29px;
+}
+
+.settings-summary-card {
+  align-self: stretch;
+}
+
+.settings-summary-list {
+  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+}
+
+.settings-summary-list > div {
+  display: grid;
+  gap: 4px;
+  padding: 11px 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface-muted);
+}
+
+.settings-summary-list dt {
+  color: var(--slate-500);
+  font-size: 0.73rem;
+}
+
+.settings-summary-list dd {
+  margin: 0;
+  color: var(--slate-800);
+  font-size: 0.86rem;
+  font-weight: 800;
+  text-transform: capitalize;
+}
+
+/* Dark theme: intentionally keeps the green IoT identity while raising contrast. */
+html[data-iot-theme='dark'] {
+  --green-100: #173c30;
+  --green-50: #102b22;
+  --slate-950: #f2f7f4;
+  --slate-800: #dce8e2;
+  --slate-700: #c3d2cb;
+  --slate-600: #a9bbb2;
+  --slate-500: #8fa39a;
+  --slate-400: #748a80;
+  --surface: rgba(12, 24, 20, 0.96);
+  --surface-strong: rgba(18, 32, 27, 0.985);
+  --surface-muted: rgba(23, 39, 33, 0.97);
+  --border: #294139;
+  --border-strong: #365349;
+  --chart-grid: #294139;
+  --chart-axis: #8ba198;
+  --shadow-shell: 0 18px 42px rgba(0, 0, 0, 0.3);
+  --shadow-card: 0 8px 22px rgba(0, 0, 0, 0.22);
+}
+
+html[data-iot-theme='dark'] .layout-shell {
+  background: rgba(3, 10, 8, 0.44);
+}
+
+html[data-iot-theme='dark'] .sidebar,
+html[data-iot-theme='dark'] .topbar {
+  border-color: var(--border);
+}
+
+html[data-iot-theme='dark'] .dashboard-body {
+  background: rgba(10, 21, 17, 0.96);
+  border-color: var(--border);
+}
+
+html[data-iot-theme='dark'] .search-box,
+html[data-iot-theme='dark'] .mobile-menu-btn,
+html[data-iot-theme='dark'] .chart-reset-btn,
+html[data-iot-theme='dark'] .range-chip,
+html[data-iot-theme='dark'] .series-toggle,
+html[data-iot-theme='dark'] .filter-chip,
+html[data-iot-theme='dark'] .settings-reset-btn {
+  background: var(--surface-strong);
+  border-color: var(--border);
+  color: var(--slate-700);
+}
+
+html[data-iot-theme='dark'] .menu-item:hover,
+html[data-iot-theme='dark'] .search-clear:hover {
+  background: #173129;
+  color: var(--slate-800);
+}
+
+html[data-iot-theme='dark'] .menu-item.active,
+html[data-iot-theme='dark'] .range-chip.active,
+html[data-iot-theme='dark'] .filter-chip.active,
+html[data-iot-theme='dark'] .series-toggle.active {
+  background: #173d30;
+  color: #75d9b1;
+}
+
+html[data-iot-theme='dark'] .brand,
+html[data-iot-theme='dark'] .setting-field,
+html[data-iot-theme='dark'] .setting-select-row {
+  border-color: var(--border);
+}
+
+html[data-iot-theme='dark'] .freshness-chip,
+html[data-iot-theme='dark'] .search-result-count,
+html[data-iot-theme='dark'] .settings-live-note {
+  background: #143027;
+  border-color: #25483c;
+  color: #9ec5b5;
+}
+
+html[data-iot-theme='dark'] .freshness-chip strong,
+html[data-iot-theme='dark'] .settings-live-note strong {
+  color: #7ed9b6;
+}
+
+html[data-iot-theme='dark'] .page-title-icon,
+html[data-iot-theme='dark'] .utility-intro-icon {
+  background: #16372b;
+  border-color: #285143;
+  color: #70d2aa;
+}
+
+html[data-iot-theme='dark'] .stat-card,
+html[data-iot-theme='dark'] .panel,
+html[data-iot-theme='dark'] .node-card,
+html[data-iot-theme='dark'] .sensor-node,
+html[data-iot-theme='dark'] .utility-card,
+html[data-iot-theme='dark'] .utility-intro,
+html[data-iot-theme='dark'] .placeholder-panel {
+  background: var(--surface-strong);
+  border-color: var(--border);
+}
+
+html[data-iot-theme='dark'] .node-card.ok {
+  background: #102a21;
+  border-color: #285440;
+}
+
+html[data-iot-theme='dark'] .node-card.fault {
+  background: #2d2116;
+  border-color: #5f4b2f;
+}
+
+html[data-iot-theme='dark'] .node-card.offline {
+  background: #2b181b;
+  border-color: #5a3038;
+}
+
+html[data-iot-theme='dark'] .node-card.unknown {
+  background: #202825;
+  border-color: #3c4b45;
+}
+
+html[data-iot-theme='dark'] .sensor-chip,
+html[data-iot-theme='dark'] .settings-summary-list > div,
+html[data-iot-theme='dark'] .endpoint-box,
+html[data-iot-theme='dark'] .config-file-list li,
+html[data-iot-theme='dark'] .troubleshooting-list li,
+html[data-iot-theme='dark'] .reliability-flow span,
+html[data-iot-theme='dark'] .help-flow span {
+  background: var(--surface-muted);
+  border-color: var(--border);
+}
+
+html[data-iot-theme='dark'] .sensor-chip.ok {
+  background: #14362a;
+  border-color: #285a45;
+  color: #74d5ad;
+}
+
+html[data-iot-theme='dark'] .sensor-chip.fault {
+  background: #3b1d22;
+  border-color: #6a303b;
+  color: #f1a6b3;
+}
+
+html[data-iot-theme='dark'] .sensor-chip.unknown {
+  background: #252e2a;
+  border-color: #414e49;
+  color: #a7b7b0;
+}
+
+html[data-iot-theme='dark'] .alert-banner,
+html[data-iot-theme='dark'] .settings-note {
+  background: #332a16;
+  border-color: #5a4926;
+  color: #e4c17b;
+}
+
+html[data-iot-theme='dark'] .error-banner {
+  background: #381b22;
+  border-color: #66303c;
+  color: #f1a5b4;
+}
+
+html[data-iot-theme='dark'] .chart-state,
+html[data-iot-theme='dark'] .empty-search-state {
+  background: var(--surface-muted);
+  color: var(--slate-600);
+}
+
+html[data-iot-theme='dark'] .switch-control.on {
+  background: #163b2d;
+  border-color: #2a5d48;
+  color: #7cd8b3;
+}
+
+html[data-iot-theme='dark'] .segmented-setting button.active {
+  border-color: #2f5b49;
+  background: #18382d;
+  color: #7cd8b3;
+}
+
+@media (max-width: 700px) {
+  .settings-hero {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .settings-reset-btn {
+    width: 100%;
+  }
+
+  .setting-field-inline,
+  .setting-select-row {
+    grid-template-columns: 1fr;
+  }
+
+  .setting-select-row select {
+    width: 100%;
+  }
+
+  .theme-setting,
+  .font-setting,
+  .range-setting {
+    grid-auto-flow: row;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .theme-setting {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .settings-summary-list {
+    grid-template-columns: 1fr;
+  }
+}
+
+
+/* =========================================================
+   Dark theme contrast pass v7
+   ========================================================= */
+html[data-iot-theme='dark'] {
+  --slate-950: #f5faf7;
+  --slate-800: #e5f1eb;
+  --slate-700: #cadbd3;
+  --slate-600: #aec2b9;
+  --slate-500: #93aaa0;
+  --slate-400: #789086;
+
+  --surface: rgba(7, 22, 17, 0.975);
+  --surface-strong: rgba(12, 31, 24, 0.985);
+  --surface-muted: rgba(18, 42, 33, 0.98);
+
+  --border: #285043;
+  --border-strong: #376457;
+  --chart-grid: #21483b;
+  --chart-axis: #9bb2a8;
+  --chart-brush-fill: #173b30;
+  --chart-brush-stroke: #35c98f;
+  --chart-active-dot-stroke: #0c1f18;
+}
+
+/* Main readable copy */
+html[data-iot-theme='dark'] .brand h2,
+html[data-iot-theme='dark'] .page-heading h1,
+html[data-iot-theme='dark'] .panel-title-with-icon,
+html[data-iot-theme='dark'] .node-card h3,
+html[data-iot-theme='dark'] .node-temperature strong,
+html[data-iot-theme='dark'] .sensor-node-head strong,
+html[data-iot-theme='dark'] .health-item-copy strong,
+html[data-iot-theme='dark'] .utility-intro h2,
+html[data-iot-theme='dark'] .utility-card-head h3,
+html[data-iot-theme='dark'] .status-guide strong,
+html[data-iot-theme='dark'] .settings-summary-list dd {
+  color: var(--slate-950);
+}
+
+html[data-iot-theme='dark'] .brand-copy p,
+html[data-iot-theme='dark'] .page-heading p,
+html[data-iot-theme='dark'] .panel-subtitle,
+html[data-iot-theme='dark'] .filter-heading,
+html[data-iot-theme='dark'] .filter-result,
+html[data-iot-theme='dark'] .metric-title,
+html[data-iot-theme='dark'] .health-item-copy span,
+html[data-iot-theme='dark'] .health-item small,
+html[data-iot-theme='dark'] .node-card-kicker,
+html[data-iot-theme='dark'] .node-temperature span,
+html[data-iot-theme='dark'] .node-meta-label,
+html[data-iot-theme='dark'] .node-sensor-summary span,
+html[data-iot-theme='dark'] .sensor-node-head span,
+html[data-iot-theme='dark'] .sensor-chip span,
+html[data-iot-theme='dark'] .utility-intro p,
+html[data-iot-theme='dark'] .utility-card-head p,
+html[data-iot-theme='dark'] .status-guide p,
+html[data-iot-theme='dark'] .settings-summary-list dt {
+  color: var(--slate-500);
+}
+
+html[data-iot-theme='dark'] .node-meta-grid strong,
+html[data-iot-theme='dark'] .node-sensor-summary strong {
+  color: #bcebd7;
+}
+
+/* Sidebar */
+html[data-iot-theme='dark'] .brand {
+  border-bottom-color: var(--border);
+}
+
+html[data-iot-theme='dark'] .menu-section-title {
+  color: #8ea69c;
+}
+
+html[data-iot-theme='dark'] .menu-item {
+  color: #9eb3aa;
+}
+
+html[data-iot-theme='dark'] .menu-icon {
+  color: #78958a;
+}
+
+html[data-iot-theme='dark'] .menu-item:hover {
+  background: #14362b;
+  color: #d9eee4;
+}
+
+html[data-iot-theme='dark'] .menu-item.active {
+  background: #164a39;
+  color: #78e0b7;
+}
+
+html[data-iot-theme='dark'] .menu-item.active .menu-icon {
+  color: #35c98f;
+}
+
+/* Top bar / search */
+html[data-iot-theme='dark'] .search-box {
+  background: #0d261e;
+  border-color: #2d594a;
+}
+
+html[data-iot-theme='dark'] .search-box input {
+  color: #e5f1eb;
+}
+
+html[data-iot-theme='dark'] .search-box input::placeholder {
+  color: #789087;
+}
+
+html[data-iot-theme='dark'] .search-icon,
+html[data-iot-theme='dark'] .search-clear {
+  color: #8ea79c;
+}
+
+/* Filter toolbar: removes the obvious white strip in dark mode */
+html[data-iot-theme='dark'] .filter-toolbar {
+  background: #102b22;
+  border-color: #2a5547;
+}
+
+html[data-iot-theme='dark'] .filter-pill {
+  background: #17362c;
+  border-color: #2a5144;
+  color: #afc5bb;
+}
+
+html[data-iot-theme='dark'] .filter-pill:hover {
+  background: #1c4537;
+  color: #def0e8;
+}
+
+html[data-iot-theme='dark'] .filter-pill.active {
+  background: #18523e;
+  border-color: #2e765d;
+  color: #7ce1b9;
+}
+
+/* Metric cards */
+html[data-iot-theme='dark'] .stat-card {
+  background: #10271f;
+  border-color: #285043;
+}
+
+html[data-iot-theme='dark'] .stat-card p {
+  color: #f4faf7;
+}
+
+html[data-iot-theme='dark'] .stat-card.highlight {
+  background: linear-gradient(145deg, #0b7b56, #09583f);
+  border-color: #16805c;
+}
+
+html[data-iot-theme='dark'] .stat-card.highlight .metric-title,
+html[data-iot-theme='dark'] .stat-card.highlight p {
+  color: #f4fffa;
+}
+
+/* Health strip */
+html[data-iot-theme='dark'] .system-health-strip {
+  background: #10271f;
+  border-color: var(--border);
+}
+
+html[data-iot-theme='dark'] .health-item + .health-item::before {
+  background: var(--border);
+}
+
+html[data-iot-theme='dark'] .health-item-icon {
+  background: #18372d;
+  color: #9bb3a8;
+}
+
+html[data-iot-theme='dark'] .health-item.good .health-item-icon {
+  background: #164633;
+  color: #6fe0b2;
+}
+
+html[data-iot-theme='dark'] .health-item.warn .health-item-icon {
+  background: #42341b;
+  color: #f2c56f;
+}
+
+html[data-iot-theme='dark'] .health-item.bad .health-item-icon {
+  background: #462129;
+  color: #f0a4b1;
+}
+
+/* Chart controls */
+html[data-iot-theme='dark'] .range-switch {
+  background: #132f26;
+  border: 1px solid #294d41;
+}
+
+html[data-iot-theme='dark'] .range-switch button {
+  color: #9fb5ab;
+}
+
+html[data-iot-theme='dark'] .range-switch button:hover {
+  color: #e4f3ec;
+}
+
+html[data-iot-theme='dark'] .range-switch button.active {
+  background: #1a4c3a;
+  border-color: #34745c;
+  color: #82e5bd;
+  box-shadow: none;
+}
+
+html[data-iot-theme='dark'] .chart-reset-btn {
+  background: #132f26;
+  border-color: #31594b;
+  color: #b7cbc2;
+}
+
+html[data-iot-theme='dark'] .chart-reset-btn:hover {
+  background: #194235;
+  color: #e7f6ef;
+}
+
+html[data-iot-theme='dark'] .series-toggle {
+  background: #142f26;
+  border-color: #294f42;
+  color: #91a89e;
+}
+
+html[data-iot-theme='dark'] .series-toggle.active {
+  background: #194536;
+  border-color: #2b654f;
+  color: #bdebd7;
+}
+
+html[data-iot-theme='dark'] .chart-skeleton {
+  background:
+    linear-gradient(#21483b 1px, transparent 1px),
+    linear-gradient(90deg, #21483b 1px, transparent 1px),
+    #0f281f;
+}
+
+html[data-iot-theme='dark'] .chart-skeleton span {
+  background: linear-gradient(90deg, transparent, #2e7158, transparent);
+}
+
+html[data-iot-theme='dark'] .chart-state strong {
+  color: var(--slate-800);
+}
+
+html[data-iot-theme='dark'] .chart-inline-warning {
+  color: #e0b568;
+}
+
+/* Node cards: eliminate pale white metadata blocks */
+html[data-iot-theme='dark'] .node-card {
+  background: #10291f;
+  border-color: #285440;
+}
+
+html[data-iot-theme='dark'] .node-card.ok {
+  background: #102d22;
+  border-color: #2b624a;
+}
+
+html[data-iot-theme='dark'] .node-meta-grid > div {
+  background: #17392d;
+  border: 1px solid #2a5947;
+}
+
+html[data-iot-theme='dark'] .node-sensor-summary {
+  border-top-color: #285043;
+}
+
+/* Status badges use dark tinted surfaces instead of near-white pills */
+html[data-iot-theme='dark'] .node-status-pill.ok {
+  background: #174c38;
+  color: #79e0b7;
+}
+
+html[data-iot-theme='dark'] .node-status-pill.fault {
+  background: #4a2028;
+  color: #f4adba;
+}
+
+html[data-iot-theme='dark'] .node-status-pill.offline {
+  background: #28332f;
+  color: #b3c2bb;
+}
+
+html[data-iot-theme='dark'] .node-status-pill.unknown {
+  background: #49381d;
+  color: #edc677;
+}
+
+/* Sensor details */
+html[data-iot-theme='dark'] .sensor-node {
+  background: #10291f;
+  border-color: #285043;
+}
+
+html[data-iot-theme='dark'] .sensor-chip {
+  background: #17372c;
+  border-color: #2b5747;
+}
+
+html[data-iot-theme='dark'] .sensor-chip.ok b {
+  color: #79dcb5;
+}
+
+/* Settings controls */
+html[data-iot-theme='dark'] .segmented-setting {
+  background: #102a21;
+  border-color: #2a5547;
+}
+
+html[data-iot-theme='dark'] .segmented-setting button {
+  color: #a7bbb2;
+}
+
+html[data-iot-theme='dark'] .segmented-setting button:hover {
+  background: #173b2f;
+}
+
+html[data-iot-theme='dark'] .segmented-setting button.active {
+  background: #1a4b3a;
+  border-color: #37745d;
+  color: #82e5bd;
+  box-shadow: none;
+}
+
+html[data-iot-theme='dark'] .setting-select-row select {
+  background: #142f26;
+  border-color: #31584a;
+  color: #e0ede7;
+  color-scheme: dark;
+}
+
+html[data-iot-theme='dark'] .switch-control {
+  background: #142f26;
+  border-color: #31584a;
+  color: #a9bbb3;
+}
+
+html[data-iot-theme='dark'] .switch-control > span {
+  background: #71877d;
+}
+
+html[data-iot-theme='dark'] .switch-control.on {
+  background: #184534;
+  border-color: #33745a;
+  color: #7ce1b9;
+}
+
+html[data-iot-theme='dark'] .switch-control.on > span {
+  background: #37ca90;
+}
+
+/* Help / Settings supporting surfaces */
+html[data-iot-theme='dark'] .endpoint-list code,
+html[data-iot-theme='dark'] .config-file-list li,
+html[data-iot-theme='dark'] .troubleshooting-list li,
+html[data-iot-theme='dark'] .settings-summary-list > div {
+  background: #17372c;
+  border-color: #2b5747;
+}
+
+html[data-iot-theme='dark'] .endpoint-list code,
+html[data-iot-theme='dark'] .config-file-list code {
+  color: #91dfbf;
+}
+
+/* Recharts SVG/tooltip details */
+html[data-iot-theme='dark'] .recharts-cartesian-axis-tick-value {
+  fill: var(--chart-axis);
+}
+
+html[data-iot-theme='dark'] .recharts-tooltip-wrapper {
+  color: var(--slate-800);
+}
+
+html[data-iot-theme='dark'] .recharts-brush-slide {
+  fill: rgba(53, 201, 143, 0.16);
+}
+
+html[data-iot-theme='dark'] .recharts-brush-traveller rect {
+  fill: #35c98f;
+  stroke: #35c98f;
+}
+
+html[data-iot-theme='dark'] .recharts-brush-texts text {
+  fill: #9bb2a8;
+}
+
+/* =========================================================
+   Typography & Help flow polish v8
+   ========================================================= */
+.layout-shell,
+button,
+input,
+select,
+textarea {
+  font-family: "Ubuntu", "Inter", "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  font-synthesis: none;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+.help-flow,
+.reliability-flow {
+  gap: 10px;
+}
+
+.help-flow span,
+.reliability-flow span {
+  min-height: 40px;
+  padding: 10px 13px;
+  font-family: inherit;
+  font-size: 0.9rem;
+  font-weight: 700;
+  line-height: 1.2;
+  letter-spacing: -0.005em;
+}
+
+.help-flow span svg,
+.reliability-flow span svg {
+  flex: 0 0 auto;
+}
+
+.help-flow b,
+.reliability-flow b {
+  font-size: 1rem;
+  font-weight: 700;
+  line-height: 1;
+}
+
+html[data-iot-theme='dark'] .help-flow span,
+html[data-iot-theme='dark'] .reliability-flow span {
+  color: #dcebe4;
+  background: #102d23;
+  border-color: #315e4f;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.025);
+}
+
+html[data-iot-theme='dark'] .help-flow span svg,
+html[data-iot-theme='dark'] .reliability-flow span svg {
+  color: #5be0ad;
+}
+
+html[data-iot-theme='dark'] .help-flow b,
+html[data-iot-theme='dark'] .reliability-flow b {
+  color: #7fae9c;
+}
+
+html[data-iot-theme='dark'] .utility-card-head h3 {
+  color: #f0f8f4;
+  font-weight: 800;
+}
+
+html[data-iot-theme='dark'] .utility-card-head p {
+  color: #a9beb5;
+}
+
+@media (max-width: 600px) {
+  .help-flow span,
+  .reliability-flow span {
+    font-size: 0.88rem;
+  }
+}

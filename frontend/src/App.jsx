@@ -21,6 +21,8 @@ import {
   LayoutDashboard,
   LogOut,
   Menu,
+  Monitor,
+  Moon,
   Radio,
   RefreshCw,
   RotateCcw,
@@ -28,7 +30,9 @@ import {
   Server,
   Settings,
   SlidersHorizontal,
+  Sun,
   Thermometer,
+  Type,
   Wifi,
   WifiOff,
   X
@@ -41,12 +45,69 @@ const API_BASE_URL =
 
 const NODE_IDS = ['node01', 'node02', 'node03'];
 const SENSOR_IDS = [0, 1, 2, 3, 4, 5];
-const POLL_INTERVAL_MS = 2000;
-const HISTORY_REFRESH_MS = 5000;
+const DEFAULT_POLL_INTERVAL_MS = 2000;
+const DEFAULT_HISTORY_REFRESH_MS = 5000;
 const OFFLINE_TIMEOUT_MS_RAW = Number(import.meta.env.VITE_NODE_OFFLINE_MS || 12000);
-const OFFLINE_TIMEOUT_MS = Number.isFinite(OFFLINE_TIMEOUT_MS_RAW)
+const DEFAULT_OFFLINE_TIMEOUT_MS = Number.isFinite(OFFLINE_TIMEOUT_MS_RAW)
   ? OFFLINE_TIMEOUT_MS_RAW
   : 12000;
+const SETTINGS_STORAGE_KEY = 'iot-system-ui-settings-v2';
+
+const DEFAULT_UI_SETTINGS = {
+  theme: 'system',
+  fontScale: 100,
+  autoRefresh: true,
+  pollIntervalMs: DEFAULT_POLL_INTERVAL_MS,
+  historyRefreshMs: DEFAULT_HISTORY_REFRESH_MS,
+  offlineTimeoutMs: DEFAULT_OFFLINE_TIMEOUT_MS,
+  defaultHistoryRangeMinutes: 60,
+  temperatureDecimals: 2,
+  chartGrid: true
+};
+
+const FONT_SCALE_OPTIONS = [90, 100, 110, 120];
+const POLL_INTERVAL_OPTIONS = [1000, 2000, 5000, 10000];
+const HISTORY_REFRESH_OPTIONS = [5000, 10000, 30000, 60000];
+const OFFLINE_THRESHOLD_OPTIONS = [10000, 12000, 15000, 30000, 60000];
+
+function loadUiSettings() {
+  try {
+    const stored = JSON.parse(window.localStorage.getItem(SETTINGS_STORAGE_KEY) || '{}');
+    const settings = { ...DEFAULT_UI_SETTINGS, ...stored };
+
+    if (!['light', 'dark', 'system'].includes(settings.theme)) {
+      settings.theme = DEFAULT_UI_SETTINGS.theme;
+    }
+
+    if (!FONT_SCALE_OPTIONS.includes(settings.fontScale)) {
+      settings.fontScale = DEFAULT_UI_SETTINGS.fontScale;
+    }
+
+    if (!POLL_INTERVAL_OPTIONS.includes(settings.pollIntervalMs)) {
+      settings.pollIntervalMs = DEFAULT_UI_SETTINGS.pollIntervalMs;
+    }
+
+    if (!HISTORY_REFRESH_OPTIONS.includes(settings.historyRefreshMs)) {
+      settings.historyRefreshMs = DEFAULT_UI_SETTINGS.historyRefreshMs;
+    }
+
+    if (!OFFLINE_THRESHOLD_OPTIONS.includes(settings.offlineTimeoutMs)) {
+      settings.offlineTimeoutMs = DEFAULT_UI_SETTINGS.offlineTimeoutMs;
+    }
+
+    if (!HISTORY_RANGES.some((range) => range.minutes === settings.defaultHistoryRangeMinutes)) {
+      settings.defaultHistoryRangeMinutes = DEFAULT_UI_SETTINGS.defaultHistoryRangeMinutes;
+    }
+
+    settings.temperatureDecimals = settings.temperatureDecimals === 1 ? 1 : 2;
+    settings.autoRefresh = settings.autoRefresh !== false;
+    settings.chartGrid = settings.chartGrid !== false;
+
+    return settings;
+  } catch {
+    return { ...DEFAULT_UI_SETTINGS };
+  }
+}
 
 const HISTORY_RANGES = [
   { label: '15m', minutes: 15, windowSeconds: 5 },
@@ -133,7 +194,7 @@ function formatNodeName(nodeId) {
   return nodeId.replace('node', 'Node ');
 }
 
-function isNodeOnline(lastSeenAt, nowMs) {
+function isNodeOnline(lastSeenAt, nowMs, offlineTimeoutMs) {
   if (!lastSeenAt) {
     return false;
   }
@@ -144,7 +205,7 @@ function isNodeOnline(lastSeenAt, nowMs) {
     return false;
   }
 
-  return nowMs - timestamp <= OFFLINE_TIMEOUT_MS;
+  return nowMs - timestamp <= offlineTimeoutMs;
 }
 
 function formatHistoryTime(value) {
@@ -323,13 +384,16 @@ HealthItem.propTypes = {
 };
 
 function App() {
+  const [uiSettings, setUiSettings] = useState(loadUiSettings);
   const [latestByNode, setLatestByNode] = useState({});
   const [latestLoading, setLatestLoading] = useState(true);
   const [history, setHistory] = useState([]);
   const [historyLoading, setHistoryLoading] = useState(true);
   const [historyError, setHistoryError] = useState('');
   const [historyReloadKey, setHistoryReloadKey] = useState(0);
-  const [historyRangeMinutes, setHistoryRangeMinutes] = useState(60);
+  const [historyRangeMinutes, setHistoryRangeMinutes] = useState(
+    () => loadUiSettings().defaultHistoryRangeMinutes
+  );
   const [chartResetKey, setChartResetKey] = useState(0);
   const [visibleSeries, setVisibleSeries] = useState(() =>
     Object.fromEntries(NODE_IDS.map((nodeId) => [nodeId, true]))
@@ -348,6 +412,59 @@ function App() {
   const [activeMenu, setActiveMenu] = useState('Dashboard');
   const [nowTick, setNowTick] = useState(Date.now());
   const [sidebarOpen, setSidebarOpen] = useState(false);
+
+  const updateUiSetting = (key, value) => {
+    setUiSettings((current) => ({ ...current, [key]: value }));
+  };
+
+  const updateDefaultHistoryRange = (minutes) => {
+    setUiSettings((current) => ({
+      ...current,
+      defaultHistoryRangeMinutes: minutes
+    }));
+    setHistoryRangeMinutes(minutes);
+    setChartResetKey((value) => value + 1);
+  };
+
+  const resetUiSettings = () => {
+    const defaults = { ...DEFAULT_UI_SETTINGS };
+    setUiSettings(defaults);
+    setHistoryRangeMinutes(defaults.defaultHistoryRangeMinutes);
+    setChartResetKey((value) => value + 1);
+  };
+
+  useEffect(() => {
+    window.localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(uiSettings));
+    document.documentElement.style.setProperty(
+      '--app-font-size',
+      `${16 * (uiSettings.fontScale / 100)}px`
+    );
+  }, [uiSettings]);
+
+  useEffect(() => {
+    const media = window.matchMedia('(prefers-color-scheme: dark)');
+
+    const applyTheme = () => {
+      const resolvedTheme =
+        uiSettings.theme === 'system'
+          ? media.matches
+            ? 'dark'
+            : 'light'
+          : uiSettings.theme;
+
+      document.documentElement.dataset.iotTheme = resolvedTheme;
+      document.documentElement.style.colorScheme = resolvedTheme;
+    };
+
+    applyTheme();
+
+    if (uiSettings.theme === 'system') {
+      media.addEventListener('change', applyTheme);
+      return () => media.removeEventListener('change', applyTheme);
+    }
+
+    return undefined;
+  }, [uiSettings.theme]);
 
   const selectedHistoryRange = useMemo(
     () =>
@@ -410,13 +527,18 @@ function App() {
     };
 
     pullLatest();
-    const interval = window.setInterval(pullLatest, POLL_INTERVAL_MS);
+
+    const interval = uiSettings.autoRefresh
+      ? window.setInterval(pullLatest, uiSettings.pollIntervalMs)
+      : null;
 
     return () => {
       active = false;
-      window.clearInterval(interval);
+      if (interval !== null) {
+        window.clearInterval(interval);
+      }
     };
-  }, []);
+  }, [uiSettings.autoRefresh, uiSettings.pollIntervalMs]);
 
   useEffect(() => {
     let active = true;
@@ -460,13 +582,23 @@ function App() {
     };
 
     pullHistory(true);
-    const interval = window.setInterval(() => pullHistory(false), HISTORY_REFRESH_MS);
+
+    const interval = uiSettings.autoRefresh
+      ? window.setInterval(() => pullHistory(false), uiSettings.historyRefreshMs)
+      : null;
 
     return () => {
       active = false;
-      window.clearInterval(interval);
+      if (interval !== null) {
+        window.clearInterval(interval);
+      }
     };
-  }, [selectedHistoryRange, historyReloadKey]);
+  }, [
+    selectedHistoryRange,
+    historyReloadKey,
+    uiSettings.autoRefresh,
+    uiSettings.historyRefreshMs
+  ]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -480,7 +612,11 @@ function App() {
     () =>
       NODE_IDS.map((nodeId) => {
         const nodeData = latestByNode?.[nodeId] || {};
-        const online = isNodeOnline(nodeData.lastSeenAt, nowTick);
+        const online = isNodeOnline(
+          nodeData.lastSeenAt,
+          nowTick,
+          uiSettings.offlineTimeoutMs
+        );
         const temperatureValid = nodeData.tempValid === true;
         const temp =
           online && temperatureValid && Number.isFinite(nodeData.temp_avg)
@@ -534,7 +670,7 @@ function App() {
           healthySensors
         };
       }),
-    [latestByNode, nowTick]
+    [latestByNode, nowTick, uiSettings.offlineTimeoutMs]
   );
 
   const normalizedSearch = search.trim().toLowerCase();
@@ -558,7 +694,7 @@ function App() {
       const numericId = Number(node.id.replace('node', ''));
       const tone = getNodeTone(node);
       const temperatureLabel =
-        node.temp === null ? '' : `${node.temp.toFixed(2)} ${Math.round(node.temp)}`;
+        node.temp === null ? '' : `${node.temp.toFixed(uiSettings.temperatureDecimals)} ${Math.round(node.temp)}`;
       const faultLabels = node.sensorFaultLabels
         .flatMap((labels) => (Array.isArray(labels) ? labels : []))
         .join(' ');
@@ -578,7 +714,7 @@ function App() {
 
       return searchableTerms.includes(normalizedSearch);
     });
-  }, [nodeCards, normalizedSearch, statusFilter]);
+  }, [nodeCards, normalizedSearch, statusFilter, uiSettings.temperatureDecimals]);
 
   const totalFaults = useMemo(
     () => nodeCards.reduce((sum, node) => sum + node.faults, 0),
@@ -604,7 +740,7 @@ function App() {
   const lastMessageTimestamp = Date.parse(systemHealth.lastMessageAt || '');
   const hasFreshGatewayMessage =
     Number.isFinite(lastMessageTimestamp) &&
-    nowTick - lastMessageTimestamp <= OFFLINE_TIMEOUT_MS;
+    nowTick - lastMessageTimestamp <= uiSettings.offlineTimeoutMs;
   const gatewayOnline =
     !lastError &&
     systemHealth.mqttConnected &&
@@ -807,12 +943,16 @@ function App() {
                 </span>
                 <span>{activeMenu}</span>
               </h1>
-              <p>Real-time node telemetry and sensor health</p>
+              {activeMenu === 'Dashboard' && (
+                <p>Real-time node telemetry and sensor health</p>
+              )}
             </div>
-            <button className="refresh-btn" onClick={() => window.location.reload()}>
-              <RefreshCw size={16} strokeWidth={2.2} aria-hidden="true" />
-              <span>Refresh</span>
-            </button>
+            {activeMenu === 'Dashboard' && (
+              <button className="refresh-btn" onClick={() => window.location.reload()}>
+                <RefreshCw size={16} strokeWidth={2.2} aria-hidden="true" />
+                <span>Refresh</span>
+              </button>
+            )}
           </section>
 
           {activeMenu === 'Dashboard' ? (
@@ -890,7 +1030,11 @@ function App() {
                     <span>Average Temp</span>
                   </h3>
                   <p>
-                    <AnimatedNumber value={avgTemp} decimals={2} suffix="°C" />
+                    <AnimatedNumber
+                      value={avgTemp}
+                      decimals={uiSettings.temperatureDecimals}
+                      suffix="°C"
+                    />
                   </p>
                 </article>
                 <article className="stat-card">
@@ -1028,25 +1172,28 @@ function App() {
                           data={history}
                           margin={{ top: 16, right: 18, left: 0, bottom: 8 }}
                         >
-                          <CartesianGrid strokeDasharray="4 4" stroke="#dfe8e4" />
+                          {uiSettings.chartGrid && (
+                            <CartesianGrid strokeDasharray="4 4" stroke="var(--chart-grid)" />
+                          )}
                           <XAxis
                             dataKey="time"
                             minTickGap={34}
-                            stroke="#789087"
+                            stroke="var(--chart-axis)"
                             tickFormatter={formatHistoryTime}
                           />
-                          <YAxis stroke="#789087" unit="°C" width={48} />
+                          <YAxis stroke="var(--chart-axis)" unit="°C" width={48} />
                           <Tooltip
                             contentStyle={{
-                              background: '#ffffff',
-                              border: '1px solid #d9e4df',
+                              background: 'var(--surface-strong)',
+                              border: '1px solid var(--border)',
+                              color: 'var(--slate-800)',
                               borderRadius: '14px',
                               boxShadow: '0 14px 30px rgba(15, 23, 42, 0.12)'
                             }}
                             formatter={(value, name) => [
                               value === null || value === undefined
                                 ? 'N/A'
-                                : `${Number(value).toFixed(2)} °C`,
+                                : `${Number(value).toFixed(uiSettings.temperatureDecimals)} °C`,
                               name
                             ]}
                             labelFormatter={(value) => `Time ${formatHistoryTime(value)}`}
@@ -1060,7 +1207,7 @@ function App() {
                               stroke={NODE_COLORS[node.id]}
                               strokeWidth={2.8}
                               dot={false}
-                              activeDot={{ r: 4, strokeWidth: 2, stroke: '#ffffff' }}
+                              activeDot={{ r: 4, strokeWidth: 2, stroke: 'var(--chart-active-dot-stroke)' }}
                               connectNulls={false}
                               isAnimationActive={false}
                             />
@@ -1070,8 +1217,8 @@ function App() {
                             dataKey="time"
                             height={26}
                             travellerWidth={8}
-                            stroke="#0a8f60"
-                            fill="#f5faf7"
+                            stroke="var(--chart-brush-stroke)"
+                            fill="var(--chart-brush-fill)"
                             tickFormatter={formatHistoryTime}
                           />
                         </LineChart>
@@ -1137,7 +1284,7 @@ function App() {
                               <span>Temperature</span>
                               <strong>
                                 {node.online && node.temp !== null
-                                  ? `${node.temp.toFixed(2)} °C`
+                                  ? `${node.temp.toFixed(uiSettings.temperatureDecimals)} °C`
                                   : '-- °C'}
                               </strong>
                             </div>
@@ -1250,12 +1397,388 @@ function App() {
                 </article>
               </section>
             </>
+          ) : activeMenu === 'Settings' ? (
+            <section className="utility-page settings-page interactive-settings-page">
+              <div className="utility-intro settings-hero">
+                <div className="utility-intro-icon">
+                  <Settings size={24} strokeWidth={2.1} />
+                </div>
+                <div className="settings-hero-copy">
+                  <span className="utility-eyebrow">Dashboard preferences</span>
+                  <h2>Settings</h2>
+                  <p>
+                    Customize appearance, refresh cadence and data freshness behavior.
+                    Changes apply immediately and are saved in this browser.
+                  </p>
+                </div>
+                <button type="button" className="settings-reset-btn" onClick={resetUiSettings}>
+                  <RotateCcw size={16} />
+                  Reset defaults
+                </button>
+              </div>
+
+              <div className="settings-live-note">
+                <span className="settings-save-dot" />
+                Saved automatically on this device
+              </div>
+
+              <div className="utility-grid settings-control-grid">
+                <article className="utility-card settings-control-card">
+                  <div className="utility-card-head">
+                    <SlidersHorizontal size={19} />
+                    <div>
+                      <h3>Appearance</h3>
+                      <p>Theme and typography for the entire dashboard.</p>
+                    </div>
+                  </div>
+
+                  <div className="setting-field">
+                    <div className="setting-field-copy">
+                      <strong>Theme</strong>
+                      <span>Choose a light, dark or OS-matched background.</span>
+                    </div>
+                    <div className="segmented-setting theme-setting" role="group" aria-label="Theme">
+                      {[
+                        { id: 'light', label: 'Light', icon: Sun },
+                        { id: 'dark', label: 'Dark', icon: Moon },
+                        { id: 'system', label: 'System', icon: Monitor }
+                      ].map(({ id, label, icon: Icon }) => (
+                        <button
+                          type="button"
+                          key={id}
+                          className={uiSettings.theme === id ? 'active' : ''}
+                          onClick={() => updateUiSetting('theme', id)}
+                        >
+                          <Icon size={15} />
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="setting-field">
+                    <div className="setting-field-copy">
+                      <strong className="setting-label-with-icon">
+                        <Type size={15} /> Font size
+                      </strong>
+                      <span>Scale text while keeping the dashboard proportions balanced.</span>
+                    </div>
+                    <div className="segmented-setting font-setting" role="group" aria-label="Font size">
+                      {FONT_SCALE_OPTIONS.map((scale) => (
+                        <button
+                          type="button"
+                          key={scale}
+                          className={uiSettings.fontScale === scale ? 'active' : ''}
+                          onClick={() => updateUiSetting('fontScale', scale)}
+                        >
+                          {scale}%
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </article>
+
+                <article className="utility-card settings-control-card">
+                  <div className="utility-card-head">
+                    <Clock size={19} />
+                    <div>
+                      <h3>Refresh & freshness</h3>
+                      <p>Control network polling and when a node is considered offline.</p>
+                    </div>
+                  </div>
+
+                  <div className="setting-field setting-field-inline">
+                    <div className="setting-field-copy">
+                      <strong>Auto refresh</strong>
+                      <span>Automatically fetch new telemetry and chart history.</span>
+                    </div>
+                    <button
+                      type="button"
+                      className={`switch-control ${uiSettings.autoRefresh ? 'on' : ''}`}
+                      onClick={() => updateUiSetting('autoRefresh', !uiSettings.autoRefresh)}
+                      aria-pressed={uiSettings.autoRefresh}
+                    >
+                      <span />
+                      <b>{uiSettings.autoRefresh ? 'On' : 'Off'}</b>
+                    </button>
+                  </div>
+
+                  <label className="setting-select-row">
+                    <span>
+                      <strong>Latest telemetry</strong>
+                      <small>Polling interval for /latest and /health</small>
+                    </span>
+                    <select
+                      value={uiSettings.pollIntervalMs}
+                      disabled={!uiSettings.autoRefresh}
+                      onChange={(event) =>
+                        updateUiSetting('pollIntervalMs', Number(event.target.value))
+                      }
+                    >
+                      {POLL_INTERVAL_OPTIONS.map((value) => (
+                        <option value={value} key={value}>{value / 1000}s</option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <label className="setting-select-row">
+                    <span>
+                      <strong>History refresh</strong>
+                      <small>How often the selected chart range is refreshed</small>
+                    </span>
+                    <select
+                      value={uiSettings.historyRefreshMs}
+                      disabled={!uiSettings.autoRefresh}
+                      onChange={(event) =>
+                        updateUiSetting('historyRefreshMs', Number(event.target.value))
+                      }
+                    >
+                      {HISTORY_REFRESH_OPTIONS.map((value) => (
+                        <option value={value} key={value}>{value / 1000}s</option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <label className="setting-select-row">
+                    <span>
+                      <strong>Offline threshold</strong>
+                      <small>No fresh packet within this period means Offline</small>
+                    </span>
+                    <select
+                      value={uiSettings.offlineTimeoutMs}
+                      onChange={(event) =>
+                        updateUiSetting('offlineTimeoutMs', Number(event.target.value))
+                      }
+                    >
+                      {OFFLINE_THRESHOLD_OPTIONS.map((value) => (
+                        <option value={value} key={value}>{value / 1000}s</option>
+                      ))}
+                    </select>
+                  </label>
+                </article>
+
+                <article className="utility-card settings-control-card">
+                  <div className="utility-card-head">
+                    <BarChart3 size={19} />
+                    <div>
+                      <h3>Chart preferences</h3>
+                      <p>Default time range and temperature presentation.</p>
+                    </div>
+                  </div>
+
+                  <div className="setting-field">
+                    <div className="setting-field-copy">
+                      <strong>Default time range</strong>
+                      <span>Also switches the current chart to the selected range.</span>
+                    </div>
+                    <div className="segmented-setting range-setting" role="group" aria-label="Default chart range">
+                      {HISTORY_RANGES.map((range) => (
+                        <button
+                          type="button"
+                          key={range.minutes}
+                          className={
+                            uiSettings.defaultHistoryRangeMinutes === range.minutes
+                              ? 'active'
+                              : ''
+                          }
+                          onClick={() => updateDefaultHistoryRange(range.minutes)}
+                        >
+                          {range.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="setting-field">
+                    <div className="setting-field-copy">
+                      <strong>Temperature precision</strong>
+                      <span>Number of decimal places shown in cards and tooltips.</span>
+                    </div>
+                    <div className="segmented-setting compact-setting" role="group" aria-label="Temperature precision">
+                      {[1, 2].map((decimals) => (
+                        <button
+                          type="button"
+                          key={decimals}
+                          className={uiSettings.temperatureDecimals === decimals ? 'active' : ''}
+                          onClick={() => updateUiSetting('temperatureDecimals', decimals)}
+                        >
+                          {decimals} decimal{decimals > 1 ? 's' : ''}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="setting-field setting-field-inline">
+                    <div className="setting-field-copy">
+                      <strong>Chart grid</strong>
+                      <span>Show horizontal and vertical guide lines.</span>
+                    </div>
+                    <button
+                      type="button"
+                      className={`switch-control ${uiSettings.chartGrid ? 'on' : ''}`}
+                      onClick={() => updateUiSetting('chartGrid', !uiSettings.chartGrid)}
+                      aria-pressed={uiSettings.chartGrid}
+                    >
+                      <span />
+                      <b>{uiSettings.chartGrid ? 'On' : 'Off'}</b>
+                    </button>
+                  </div>
+                </article>
+
+                <article className="utility-card settings-summary-card">
+                  <div className="utility-card-head">
+                    <Activity size={19} />
+                    <div>
+                      <h3>Current behavior</h3>
+                      <p>A quick summary of the settings active in this browser.</p>
+                    </div>
+                  </div>
+
+                  <dl className="settings-summary-list">
+                    <div><dt>Theme</dt><dd>{uiSettings.theme}</dd></div>
+                    <div><dt>Font</dt><dd>{uiSettings.fontScale}%</dd></div>
+                    <div>
+                      <dt>Live polling</dt>
+                      <dd>{uiSettings.autoRefresh ? `${uiSettings.pollIntervalMs / 1000}s` : 'Manual'}</dd>
+                    </div>
+                    <div>
+                      <dt>History refresh</dt>
+                      <dd>{uiSettings.autoRefresh ? `${uiSettings.historyRefreshMs / 1000}s` : 'Manual'}</dd>
+                    </div>
+                    <div><dt>Offline after</dt><dd>{uiSettings.offlineTimeoutMs / 1000}s</dd></div>
+                    <div>
+                      <dt>Default range</dt>
+                      <dd>{HISTORY_RANGES.find((range) => range.minutes === uiSettings.defaultHistoryRangeMinutes)?.label}</dd>
+                    </div>
+                  </dl>
+                </article>
+              </div>
+            </section>
+          ) : activeMenu === 'Help' ? (
+            <section className="utility-page help-page">
+              <div className="utility-intro">
+                <div className="utility-intro-icon">
+                  <CircleHelp size={24} strokeWidth={2.1} />
+                </div>
+                <div>
+                  <span className="utility-eyebrow">Operations guide</span>
+                  <h2>Help & Troubleshooting</h2>
+                  <p>
+                    Quick reference for understanding node states and locating failures
+                    across the STM32 → Gateway → Backend → Frontend pipeline.
+                  </p>
+                </div>
+              </div>
+
+              <div className="utility-grid help-grid">
+                <article className="utility-card help-wide-card">
+                  <div className="utility-card-head">
+                    <Activity size={19} />
+                    <div>
+                      <h3>Data flow</h3>
+                      <p>Normal path from sensing to visualization.</p>
+                    </div>
+                  </div>
+                  <div className="help-flow">
+                    <span><Cpu size={16} /> STM32 Nodes</span>
+                    <b>→</b>
+                    <span><Radio size={16} /> LoRa Gateway</span>
+                    <b>→</b>
+                    <span><Wifi size={16} /> MQTT</span>
+                    <b>→</b>
+                    <span><Server size={16} /> Backend</span>
+                    <b>→</b>
+                    <span><Database size={16} /> InfluxDB</span>
+                    <b>→</b>
+                    <span><BarChart3 size={16} /> Dashboard</span>
+                  </div>
+                </article>
+
+                <article className="utility-card">
+                  <div className="utility-card-head">
+                    <Thermometer size={19} />
+                    <div>
+                      <h3>Status meanings</h3>
+                      <p>How to interpret node and sensor states.</p>
+                    </div>
+                  </div>
+                  <div className="status-guide">
+                    <div>
+                      <span className="guide-dot good" />
+                      <strong>Online</strong>
+                      <p>Fresh telemetry is arriving within the offline threshold.</p>
+                    </div>
+                    <div>
+                      <span className="guide-dot bad" />
+                      <strong>Offline</strong>
+                      <p>No recent telemetry has been received from the node.</p>
+                    </div>
+                    <div>
+                      <span className="guide-dot warn" />
+                      <strong>Fault</strong>
+                      <p>At least one sensor reports a diagnostic fault.</p>
+                    </div>
+                    <div>
+                      <span className="guide-dot unknown" />
+                      <strong>Unknown</strong>
+                      <p>Status data is incomplete or has not arrived yet.</p>
+                    </div>
+                  </div>
+                </article>
+
+                <article className="utility-card">
+                  <div className="utility-card-head">
+                    <AlertTriangle size={19} />
+                    <div>
+                      <h3>Fast troubleshooting</h3>
+                      <p>Check the failing layer before changing firmware.</p>
+                    </div>
+                  </div>
+                  <ol className="troubleshooting-list">
+                    <li>
+                      <strong>No node telemetry</strong>
+                      <span>Check Gateway serial log for POLL, DATA, ACK and LoRa RSSI.</span>
+                    </li>
+                    <li>
+                      <strong>Dashboard is stale</strong>
+                      <span>Check <code>/latest</code> and the Last update indicator.</span>
+                    </li>
+                    <li>
+                      <strong>Chart unavailable</strong>
+                      <span>Check <code>/history</code> and confirm InfluxDB query access.</span>
+                    </li>
+                    <li>
+                      <strong>InfluxDB outage</strong>
+                      <span>Check <code>/ingest-status</code>; pending should drain after recovery.</span>
+                    </li>
+                  </ol>
+                </article>
+
+                <article className="utility-card help-wide-card">
+                  <div className="utility-card-head">
+                    <Server size={19} />
+                    <div>
+                      <h3>Useful checks</h3>
+                      <p>Quick commands to verify the main services on the Ubuntu host.</p>
+                    </div>
+                  </div>
+                  <div className="command-grid">
+                    <code>systemctl is-active mosquitto</code>
+                    <code>systemctl is-active influxdb</code>
+                    <code>curl http://127.0.0.1:3000/health</code>
+                    <code>curl http://127.0.0.1:3000/latest</code>
+                    <code>curl http://127.0.0.1:3000/ingest-status</code>
+                    <code>curl &apos;http://127.0.0.1:3000/history?minutes=60&amp;window=5&apos;</code>
+                  </div>
+                </article>
+              </div>
+            </section>
           ) : (
             <section className="placeholder-panel">
               <div>
                 <Activity size={28} />
-                <h2>Coming soon</h2>
-                <p>Section is under construction.</p>
+                <h2>Session</h2>
+                <p>No additional session actions are configured.</p>
               </div>
             </section>
           )}
