@@ -4,7 +4,7 @@
 
 ***
 
-<img width="1902" height="2135" alt="gateway" src="https://github.com/user-attachments/assets/eeb2852e-a99e-4ef3-864b-aa3f68e8c030" />
+<img width="1600" height="1900" alt="gateway" src="https://github.com/user-attachments/assets/eeb2852e-a99e-4ef3-864b-aa3f68e8c030" />
 
 
 ***
