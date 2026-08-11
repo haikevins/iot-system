@@ -24,8 +24,7 @@ import {
   Settings,
   Thermometer,
   Wifi,
-  WifiOff,
-  X
+  WifiOff
 } from 'lucide-react';
 import './App.css';
 
@@ -352,38 +351,13 @@ function App() {
       }),
     [latestByNode, nowTick]
   );
-  const normalizedSearch = search.trim().toLowerCase();
-
-  const filteredNodes = useMemo(() => {
-    if (!normalizedSearch) {
-      return nodeCards;
-    }
-
-    return nodeCards.filter((node) => {
-      const numericId = Number(node.id.replace('node', ''));
-      const statusLabel = !node.online
-        ? 'offline'
-        : node.unknownSensors > 0
-          ? 'unknown'
-          : node.faults > 0
-            ? 'fault'
-            : 'online all good';
-      const temperatureLabel =
-        node.temp === null ? '' : `${node.temp.toFixed(2)} ${Math.round(node.temp)}`;
-      const searchableTerms = [
-        node.id,
-        formatNodeName(node.id),
-        Number.isFinite(numericId) ? `node ${numericId}` : '',
-        Number.isFinite(numericId) ? String(numericId) : '',
-        statusLabel,
-        temperatureLabel
-      ]
-        .join(' ')
-        .toLowerCase();
-
-      return searchableTerms.includes(normalizedSearch);
-    });
-  }, [nodeCards, normalizedSearch]);
+  const filteredNodes = useMemo(
+    () =>
+      nodeCards.filter((node) =>
+        node.id.toLowerCase().includes(search.trim().toLowerCase())
+      ),
+    [nodeCards, search]
+  );
 
   const totalFaults = useMemo(
     () => nodeCards.reduce((sum, node) => sum + node.faults, 0),
@@ -482,29 +456,13 @@ function App() {
       <main className="dashboard">
         <header className="topbar">
           <div className="search-box">
-            <Search className="search-icon" size={19} strokeWidth={2} aria-hidden="true" />
+            <Search className="search-icon" size={17} strokeWidth={2} aria-hidden="true" />
             <input
               value={search}
               onChange={(event) => setSearch(event.target.value)}
-              placeholder="Search Node 01, node02, online..."
+              placeholder="Search nodes..."
               aria-label="Search nodes"
             />
-            {normalizedSearch && (
-              <span className="search-result-count" aria-live="polite">
-                {filteredNodes.length}/{nodeCards.length}
-              </span>
-            )}
-            {search && (
-              <button
-                type="button"
-                className="search-clear"
-                onClick={() => setSearch('')}
-                aria-label="Clear search"
-                title="Clear search"
-              >
-                <X size={17} strokeWidth={2.2} />
-              </button>
-            )}
           </div>
 
           <div className="topbar-right">
@@ -620,9 +578,7 @@ function App() {
                         labelFormatter={formatHistoryTime}
                       />
                       <Legend />
-                      {filteredNodes.map((node) => {
-                        const nodeId = node.id;
-                        return (
+                      {NODE_IDS.map((nodeId) => (
                       <Line
                         key={nodeId}
                         type="monotone"
@@ -637,8 +593,7 @@ function App() {
                         animationDuration={700}
                         animationEasing="ease-out"
                       />
-                        );
-                      })}
+                      ))}
                     </LineChart>
                   </ResponsiveContainer>
                 </article>
@@ -651,11 +606,6 @@ function App() {
                     </h2>
                   </div>
                   <div className="node-list">
-                    {filteredNodes.length === 0 && (
-                      <div className="empty-search-state">
-                        No nodes match “{search.trim()}”.
-                      </div>
-                    )}
                     {filteredNodes.map((node, index) => {
                       const tone = !node.online
                         ? 'offline'
@@ -700,11 +650,6 @@ function App() {
                     </h2>
                   </div>
                   <div className="sensor-scroll">
-                    {filteredNodes.length === 0 && (
-                      <div className="empty-search-state">
-                        No sensor groups match “{search.trim()}”.
-                      </div>
-                    )}
                     {filteredNodes.map((node, nodeIndex) => (
                       <div className="sensor-node" key={node.id} style={{ '--node-delay': `${nodeIndex * 70}ms` }}>
                         <div className="sensor-node-head">

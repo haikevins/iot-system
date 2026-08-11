@@ -18,14 +18,11 @@ import {
   Cpu,
   LayoutDashboard,
   LogOut,
-  RefreshCw,
-  Search,
   Server,
   Settings,
   Thermometer,
   Wifi,
-  WifiOff,
-  X
+  WifiOff
 } from 'lucide-react';
 import './App.css';
 
@@ -352,38 +349,13 @@ function App() {
       }),
     [latestByNode, nowTick]
   );
-  const normalizedSearch = search.trim().toLowerCase();
-
-  const filteredNodes = useMemo(() => {
-    if (!normalizedSearch) {
-      return nodeCards;
-    }
-
-    return nodeCards.filter((node) => {
-      const numericId = Number(node.id.replace('node', ''));
-      const statusLabel = !node.online
-        ? 'offline'
-        : node.unknownSensors > 0
-          ? 'unknown'
-          : node.faults > 0
-            ? 'fault'
-            : 'online all good';
-      const temperatureLabel =
-        node.temp === null ? '' : `${node.temp.toFixed(2)} ${Math.round(node.temp)}`;
-      const searchableTerms = [
-        node.id,
-        formatNodeName(node.id),
-        Number.isFinite(numericId) ? `node ${numericId}` : '',
-        Number.isFinite(numericId) ? String(numericId) : '',
-        statusLabel,
-        temperatureLabel
-      ]
-        .join(' ')
-        .toLowerCase();
-
-      return searchableTerms.includes(normalizedSearch);
-    });
-  }, [nodeCards, normalizedSearch]);
+  const filteredNodes = useMemo(
+    () =>
+      nodeCards.filter((node) =>
+        node.id.toLowerCase().includes(search.trim().toLowerCase())
+      ),
+    [nodeCards, search]
+  );
 
   const totalFaults = useMemo(
     () => nodeCards.reduce((sum, node) => sum + node.faults, 0),
@@ -420,12 +392,9 @@ function App() {
     <div className="layout-shell">
       <aside className="sidebar">
         <div className="brand">
-          <span className="brand-icon" aria-hidden="true">
-            <Cpu size={21} strokeWidth={2.1} />
-          </span>
-          <div className="brand-copy">
-            <h2>IoT System</h2>
-            <p>Temperature Monitoring</p>
+          <span className="brand-icon">◎</span>
+          <div>
+            <h2>Monitor</h2>
           </div>
         </div>
 
@@ -482,55 +451,36 @@ function App() {
       <main className="dashboard">
         <header className="topbar">
           <div className="search-box">
-            <Search className="search-icon" size={19} strokeWidth={2} aria-hidden="true" />
+            <span className="search-icon">⌕</span>
             <input
               value={search}
               onChange={(event) => setSearch(event.target.value)}
-              placeholder="Search Node 01, node02, online..."
-              aria-label="Search nodes"
+              placeholder="Search"
             />
-            {normalizedSearch && (
-              <span className="search-result-count" aria-live="polite">
-                {filteredNodes.length}/{nodeCards.length}
-              </span>
-            )}
-            {search && (
-              <button
-                type="button"
-                className="search-clear"
-                onClick={() => setSearch('')}
-                aria-label="Clear search"
-                title="Clear search"
-              >
-                <X size={17} strokeWidth={2.2} />
-              </button>
-            )}
           </div>
 
           <div className="topbar-right">
             <div className={`connection-pill ${gatewayOnline ? 'good' : 'bad'}`}>
-              {gatewayOnline ? (
-                <Wifi size={15} strokeWidth={2.2} aria-hidden="true" />
-              ) : (
-                <WifiOff size={15} strokeWidth={2.2} aria-hidden="true" />
-              )}
-              <span>Gateway {gatewayOnline ? 'Online' : 'Offline'}</span>
+              <span className="pill-dot" />
+              {gatewayOnline ? 'Online' : 'Offline'}
+            </div>
+            <div className="profile-chip">
+              <div className="avatar">NNH</div>
+              <div>
+                <strong>Nguyen Ngoc Hai</strong>
+              </div>
             </div>
           </div>
         </header>
         <div className="search-dashboard-divider" />
         <div className="dashboard-body">
           <section className="heading-row">
-            <div className="heading-copy">
-              <h1 className="title-with-icon">
-                <ActiveMenuIcon size={22} strokeWidth={2.2} />
-                <span>{activeMenu}</span>
-              </h1>
-              <p>Real-time node telemetry and sensor health</p>
-            </div>
+            <h1 className="title-with-icon">
+              <ActiveMenuIcon size={24} strokeWidth={2.2} />
+              <span>{activeMenu}</span>
+            </h1>
             <button className="refresh-btn" onClick={() => window.location.reload()}>
-              <RefreshCw size={15} strokeWidth={2.2} aria-hidden="true" />
-              <span>Refresh</span>
+              Refresh
             </button>
           </section>
 
@@ -594,8 +544,8 @@ function App() {
                       <span>Temperature</span>
                     </h2>
                   </div>
-                  <ResponsiveContainer width="100%" height={270}>
-                    <LineChart data={history} margin={{ top: 12, right: 16, left: -4, bottom: 0 }}>
+                  <ResponsiveContainer width="100%" height={210}>
+                    <LineChart data={history} margin={{ top: 10, right: 12, left: 0, bottom: 0 }}>
                       <defs>
                         {NODE_IDS.map((nodeId) => (
                           <linearGradient id={`tempLine-${nodeId}`} key={nodeId} x1="0" y1="0" x2="1" y2="0">
@@ -620,9 +570,7 @@ function App() {
                         labelFormatter={formatHistoryTime}
                       />
                       <Legend />
-                      {filteredNodes.map((node) => {
-                        const nodeId = node.id;
-                        return (
+                      {NODE_IDS.map((nodeId) => (
                       <Line
                         key={nodeId}
                         type="monotone"
@@ -637,8 +585,7 @@ function App() {
                         animationDuration={700}
                         animationEasing="ease-out"
                       />
-                        );
-                      })}
+                      ))}
                     </LineChart>
                   </ResponsiveContainer>
                 </article>
@@ -651,11 +598,6 @@ function App() {
                     </h2>
                   </div>
                   <div className="node-list">
-                    {filteredNodes.length === 0 && (
-                      <div className="empty-search-state">
-                        No nodes match “{search.trim()}”.
-                      </div>
-                    )}
                     {filteredNodes.map((node, index) => {
                       const tone = !node.online
                         ? 'offline'
@@ -700,11 +642,6 @@ function App() {
                     </h2>
                   </div>
                   <div className="sensor-scroll">
-                    {filteredNodes.length === 0 && (
-                      <div className="empty-search-state">
-                        No sensor groups match “{search.trim()}”.
-                      </div>
-                    )}
                     {filteredNodes.map((node, nodeIndex) => (
                       <div className="sensor-node" key={node.id} style={{ '--node-delay': `${nodeIndex * 70}ms` }}>
                         <div className="sensor-node-head">
