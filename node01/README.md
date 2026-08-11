@@ -4,6 +4,16 @@
 
 ***
 
+<p align="center">
+  <img
+    src="https://github.com/user-attachments/assets/dceba018-566e-4e52-969b-e49932a1c67c"
+    alt="gateway"
+    width="500"
+  />
+</p>
+
+***
+
 ## Table of Contents
 
 1. [Overview](#overview)
