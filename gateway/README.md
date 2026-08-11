@@ -4,8 +4,13 @@
 
 ***
 
-<img width="1000" height="1200" alt="gateway" src="https://github.com/user-attachments/assets/eeb2852e-a99e-4ef3-864b-aa3f68e8c030" />
-
+<p align="center">
+  <img
+    src="https://github.com/user-attachments/assets/eeb2852e-a99e-4ef3-864b-aa3f68e8c030"
+    alt="gateway"
+    width="500"
+  />
+</p>
 
 ***
 
