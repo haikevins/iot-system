@@ -9,11 +9,13 @@
 #define DATA_TRANSMIT_MAX_ATTEMPTS          3U
 
 #define SENSOR_COUNT                        6U
-#define TEMPERATURE_PAYLOAD_LENGTH          (3U + SENSOR_COUNT)
+#define SAMPLE_AGE_FIELD_LENGTH             4U
+#define TEMPERATURE_PAYLOAD_LENGTH          (3U + SENSOR_COUNT + SAMPLE_AGE_FIELD_LENGTH)
 #define PAYLOAD_TEMPERATURE_LSB_INDEX       0U
 #define PAYLOAD_TEMPERATURE_MSB_INDEX       1U
 #define PAYLOAD_STATUS_INDEX                2U
 #define PAYLOAD_FAULT_BASE_INDEX            3U
+#define PAYLOAD_SAMPLE_AGE_INDEX            (PAYLOAD_FAULT_BASE_INDEX + SENSOR_COUNT)
 
 #define TEMPERATURE_SCALE                   100.0f
 #define TEMPERATURE_INVALID_CENTI_C         ((int16_t)-32768)
@@ -54,6 +56,20 @@ static int16_t EncodeTemperatureCentiCelsius(float temperatureCelsius)
 }
 
 /**
+ * @brief  Encodes a 32-bit unsigned integer in little-endian byte order.
+ * @param  destination: Four-byte output buffer.
+ * @param  value: Value to encode.
+ * @retval None
+ */
+static void EncodeUint32LittleEndian(uint8_t destination[4], uint32_t value)
+{
+    destination[0] = (uint8_t)(value & 0x000000FFUL);
+    destination[1] = (uint8_t)((value >> 8U) & 0x000000FFUL);
+    destination[2] = (uint8_t)((value >> 16U) & 0x000000FFUL);
+    destination[3] = (uint8_t)((value >> 24U) & 0x000000FFUL);
+}
+
+/**
  * @brief  Waits for an ACK that matches the current node and sequence number.
  * @param  sequence: Sequence number of the DATA packet being acknowledged.
  * @retval 1 when a matching ACK is received before timeout, otherwise 0.
@@ -88,11 +104,13 @@ static _Bool WaitForAcknowledgement(uint8_t sequence)
 /**
  * @brief  Sends one DATA packet and retries when the matching ACK is not received.
  * @param  sequence: Sequence number copied from the gateway POLL packet.
- * @param  payload: Temperature, status and six detailed-fault bytes.
+ * @param  payload: Temperature, status, six detailed faults and sample age.
+ * @param  measurementTimeMs: Midpoint timestamp of the ADC acquisition burst.
  * @retval 1 when the transaction is acknowledged, otherwise 0.
  */
 static _Bool SendTemperatureWithRetry(uint8_t sequence,
-    const uint8_t payload[TEMPERATURE_PAYLOAD_LENGTH])
+    uint8_t payload[TEMPERATURE_PAYLOAD_LENGTH],
+    uint32_t measurementTimeMs)
 {
     uint8_t attemptIndex;
 
@@ -100,6 +118,13 @@ static _Bool SendTemperatureWithRetry(uint8_t sequence,
          attemptIndex < DATA_TRANSMIT_MAX_ATTEMPTS;
          attemptIndex++)
     {
+        const uint32_t sampleAgeMs =
+            (uint32_t)(millis() - measurementTimeMs);
+
+        EncodeUint32LittleEndian(
+            &payload[PAYLOAD_SAMPLE_AGE_INDEX],
+            sampleAgeMs);
+
         if (!SX1278_SendPacket(SX1278_ADDR,
             SX1278_TYPE_TEMPERATURE,
             sequence,
@@ -126,8 +151,8 @@ static _Bool SendTemperatureWithRetry(uint8_t sequence,
 
 /**
  * @brief  Waits for gateway POLL packets and returns temperature and diagnostics.
- * @note   DATA payload is TEMP_L | TEMP_H | STATUS | FAULT_S1..FAULT_S6.
- * @note   Each detailed fault byte contains the low 8 bits of SensorFaultCode.
+ * @note   DATA payload is TEMP_L | TEMP_H | STATUS | FAULT_S1..FAULT_S6 | SAMPLE_AGE_MS_LE32.
+ * @note   SAMPLE_AGE_MS is recomputed before every retry from the ADC-burst midpoint.
  * @retval Never returns.
  */
 int main(void)
@@ -144,6 +169,7 @@ int main(void)
         int16_t encodedTemperature;
         uint8_t sensorStatusMask;
         uint8_t sensorIndex;
+        uint32_t measurementTimeMs;
         uint8_t transmitPayload[TEMPERATURE_PAYLOAD_LENGTH];
 
         if (!SX1278_ReceivePacket(&receivedPacket, NODE_RECEIVE_TIMEOUT_MS))
@@ -159,6 +185,7 @@ int main(void)
         }
 
         averageTemperatureCelsius = ADC_GetStableAverageTemp();
+        measurementTimeMs = ADC_GetLastMeasurementTimeMs();
         sensorStatusMask = (uint8_t)(ADC_GetStatusBitmask() & 0x3FU);
         encodedTemperature = EncodeTemperatureCentiCelsius(averageTemperatureCelsius);
 
@@ -174,6 +201,9 @@ int main(void)
                 (uint8_t)(ADC_GetSensorFaultCode(sensorIndex) & 0x00FFU);
         }
 
-        SendTemperatureWithRetry(receivedPacket.seq, transmitPayload);
+        SendTemperatureWithRetry(
+            receivedPacket.seq,
+            transmitPayload,
+            measurementTimeMs);
     }
 }

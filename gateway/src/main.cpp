@@ -31,9 +31,19 @@
 #define SENSOR_COUNT                        6U
 #define LEGACY_TEMPERATURE_PAYLOAD_LENGTH  3U
 #define DETAILED_TEMPERATURE_PAYLOAD_LENGTH (3U + SENSOR_COUNT)
-#define TEMPERATURE_PAYLOAD_LENGTH         DETAILED_TEMPERATURE_PAYLOAD_LENGTH
+#define TIMESTAMPED_TEMPERATURE_PAYLOAD_LENGTH (DETAILED_TEMPERATURE_PAYLOAD_LENGTH + 4U)
+#define TEMPERATURE_PAYLOAD_LENGTH         TIMESTAMPED_TEMPERATURE_PAYLOAD_LENGTH
 #define PAYLOAD_STATUS_INDEX               2U
 #define PAYLOAD_FAULT_BASE_INDEX           3U
+#define PAYLOAD_SAMPLE_AGE_INDEX           (PAYLOAD_FAULT_BASE_INDEX + SENSOR_COUNT)
+
+/*
+ * SF7, BW125 kHz, CR4/5, explicit header, CRC on, preamble 8 and a 19-byte
+ * application frame (13-byte DATA payload + six protocol bytes) gives about
+ * 51.5 ms time-on-air.  Round up so the reconstructed timestamp does not make
+ * a sample appear newer than it actually is.
+ */
+#define TIMESTAMPED_DATA_AIRTIME_MS         52UL
 #define TEMPERATURE_INVALID_CENTI_C        ((int16_t)-32768)
 
 #define DATA_WAIT_TIMEOUT_MS               1000UL
@@ -908,14 +918,28 @@ static int16_t DecodeTemperatureCentiCelsius(const uint8_t *payload)
 }
 
 /**
+ * @brief  Decodes a little-endian 32-bit unsigned integer.
+ * @param  data: Pointer to four bytes.
+ * @retval Decoded value.
+ */
+static uint32_t DecodeUint32LittleEndian(const uint8_t *data)
+{
+    return ((uint32_t)data[0]) |
+        ((uint32_t)data[1] << 8U) |
+        ((uint32_t)data[2] << 16U) |
+        ((uint32_t)data[3] << 24U);
+}
+
+/**
  * @brief  Checks whether a DATA payload length is supported by the gateway.
  * @param  payloadLength: DATA payload length.
- * @retval true for legacy 3-byte or detailed 9-byte telemetry payloads.
+ * @retval true for legacy 3-byte, detailed 9-byte or timestamped 13-byte payloads.
  */
 static bool IsSupportedTemperaturePayloadLength(uint8_t payloadLength)
 {
     return (payloadLength == LEGACY_TEMPERATURE_PAYLOAD_LENGTH) ||
-        (payloadLength == DETAILED_TEMPERATURE_PAYLOAD_LENGTH);
+        (payloadLength == DETAILED_TEMPERATURE_PAYLOAD_LENGTH) ||
+        (payloadLength == TIMESTAMPED_TEMPERATURE_PAYLOAD_LENGTH);
 }
 
 /**
@@ -1237,6 +1261,8 @@ static int EnqueueTelemetryQos1(const PersistentTelemetryRecord &record)
  * @param  sensorFaults: Six detailed fault-code bytes.
  * @param  faultDetailValid: true when detailed fault bytes are available.
  * @param  capturedAtMs: Gateway uptime timestamp when the DATA frame was accepted.
+ * @param  nodeSampleAgeMs: Age reported by STM32 from ADC-burst midpoint to TX.
+ * @param  nodeSampleAgeValid: true when the DATA payload contains sample age.
  * @retval true when the record is durably committed to NVS, otherwise false.
  */
 static bool PersistTelemetry(uint8_t address,
@@ -1245,7 +1271,9 @@ static bool PersistTelemetry(uint8_t address,
     uint8_t status,
     const uint8_t sensorFaults[SENSOR_COUNT],
     bool faultDetailValid,
-    uint32_t capturedAtMs)
+    uint32_t capturedAtMs,
+    uint32_t nodeSampleAgeMs,
+    bool nodeSampleAgeValid)
 {
     TelemetryMessage message = {};
     message.address = address;
@@ -1266,7 +1294,24 @@ static bool PersistTelemetry(uint8_t address,
 
     message.capturedAtMs = capturedAtMs;
     message.bootId = s_currentBootId;
-    message.sampledAtUnixMs = GetUnixTimeMs();
+
+    const uint64_t receivedAtUnixMs = GetUnixTimeMs();
+
+    if (nodeSampleAgeValid &&
+        (receivedAtUnixMs != 0ULL) &&
+        (receivedAtUnixMs >=
+            ((uint64_t)nodeSampleAgeMs + TIMESTAMPED_DATA_AIRTIME_MS)))
+    {
+        message.sampledAtUnixMs =
+            receivedAtUnixMs -
+            (uint64_t)nodeSampleAgeMs -
+            (uint64_t)TIMESTAMPED_DATA_AIRTIME_MS;
+    }
+    else
+    {
+        /* Rolling-update fallback for legacy 3-byte / 9-byte node payloads. */
+        message.sampledAtUnixMs = receivedAtUnixMs;
+    }
 
     return PersistentOutboxPush(message);
 }
@@ -1472,7 +1517,17 @@ static void LoraTask(void *parameter)
                     (uint8_t)(packet.data[PAYLOAD_STATUS_INDEX] & 0x3FU);
                 uint8_t sensorFaults[SENSOR_COUNT] = {0U};
                 const bool faultDetailValid =
-                    packet.length == DETAILED_TEMPERATURE_PAYLOAD_LENGTH;
+                    (packet.length == DETAILED_TEMPERATURE_PAYLOAD_LENGTH) ||
+                    (packet.length == TIMESTAMPED_TEMPERATURE_PAYLOAD_LENGTH);
+                const bool nodeSampleAgeValid =
+                    packet.length == TIMESTAMPED_TEMPERATURE_PAYLOAD_LENGTH;
+                uint32_t nodeSampleAgeMs = 0UL;
+
+                if (nodeSampleAgeValid)
+                {
+                    nodeSampleAgeMs = DecodeUint32LittleEndian(
+                        &packet.data[PAYLOAD_SAMPLE_AGE_INDEX]);
+                }
 
                 if (faultDetailValid)
                 {
@@ -1505,7 +1560,9 @@ static void LoraTask(void *parameter)
                     status,
                     sensorFaults,
                     faultDetailValid,
-                    capturedAtMs);
+                    capturedAtMs,
+                    nodeSampleAgeMs,
+                    nodeSampleAgeValid);
 
                 if (!persisted)
                 {
@@ -1519,21 +1576,25 @@ static void LoraTask(void *parameter)
 
                 if (temperatureCentiCelsius == TEMPERATURE_INVALID_CENTI_C)
                 {
-                    LOGI("[DATA] node=%02X seq=%u temp=INVALID status=%u detail=%s rssi=%d\n",
+                    LOGI("[DATA] node=%02X seq=%u temp=INVALID status=%u detail=%s adc_age=%s%lu rssi=%d\n",
                         currentNodeAddress,
                         currentSequence,
                         status,
                         faultDetailValid ? "yes" : "no",
+                        nodeSampleAgeValid ? "" : "n/a:",
+                        (unsigned long)nodeSampleAgeMs,
                         LoRa.packetRssi());
                 }
                 else
                 {
-                    LOGI("[DATA] node=%02X seq=%u temp_raw=%d status=%u detail=%s rssi=%d\n",
+                    LOGI("[DATA] node=%02X seq=%u temp_raw=%d status=%u detail=%s adc_age=%s%lu rssi=%d\n",
                         currentNodeAddress,
                         currentSequence,
                         temperatureCentiCelsius,
                         status,
                         faultDetailValid ? "yes" : "no",
+                        nodeSampleAgeValid ? "" : "n/a:",
+                        (unsigned long)nodeSampleAgeMs,
                         LoRa.packetRssi());
                 }
 

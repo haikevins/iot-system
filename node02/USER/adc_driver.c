@@ -67,6 +67,7 @@ typedef struct
 static SensorState_t s_sensorState[NUMBER_CHANNEL];
 
 static uint32_t s_lastUpdateTimeMs;
+static uint32_t s_lastMeasurementTimeMs;
 static uint8_t s_isFrameValid;
 
 /**
@@ -381,6 +382,8 @@ static void ADC_UpdateSensorData(void)
     float peerMedian = 0.0f;
 
     uint32_t currentTimeMs = millis();
+    uint32_t acquisitionStartTimeMs;
+    uint32_t acquisitionDurationMs;
     uint8_t channelIndex;
 
     if ((s_isFrameValid != 0U) &&
@@ -389,7 +392,18 @@ static void ADC_UpdateSensorData(void)
         return;
     }
 
+    acquisitionStartTimeMs = millis();
     AcquireFilteredRawSamples(rawAdc, rawSpreadValue);
+    acquisitionDurationMs = (uint32_t)(millis() - acquisitionStartTimeMs);
+
+    /*
+     * The filtered frame represents the whole burst, so its best timestamp is
+     * the midpoint between the first and last raw samples rather than the end
+     * of the processing function.  Unsigned arithmetic keeps this wrap-safe.
+     */
+    s_lastMeasurementTimeMs =
+        acquisitionStartTimeMs + (acquisitionDurationMs / 2U);
+    currentTimeMs = s_lastMeasurementTimeMs;
 
     for (channelIndex = 0U; channelIndex < NUMBER_CHANNEL; channelIndex++)
     {
@@ -757,4 +771,14 @@ float ADC_GetSensorResistance(uint8_t channelIndex)
 
     ADC_UpdateSensorData();
     return s_sensorState[channelIndex].resistanceOhm;
+}
+
+/**
+ * @brief  Returns the timestamp represented by the latest filtered ADC burst.
+ * @note   The timestamp is the midpoint of the 16-sample acquisition window.
+ * @retval STM32 uptime tick in milliseconds.
+ */
+uint32_t ADC_GetLastMeasurementTimeMs(void)
+{
+    return s_lastMeasurementTimeMs;
 }

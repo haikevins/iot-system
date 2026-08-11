@@ -119,4 +119,10 @@ SensorFaultCode MCP3208_GetObservedFaultCode(uint8_t channel);
  */
 float MCP3208_GetSensorResistance(uint8_t channel);
 
+/**
+ * @brief  Returns the midpoint timestamp of the latest ADC acquisition burst.
+ * @retval STM32 uptime tick in milliseconds.
+ */
+uint32_t MCP3208_GetLastMeasurementTimeMs(void);
+
 #endif

@@ -118,4 +118,10 @@ uint16_t ADC_GetSensorRaw(uint8_t channel);
  */
 float ADC_GetSensorResistance(uint8_t channel);
 
+/**
+ * @brief  Returns the midpoint timestamp of the latest ADC acquisition burst.
+ * @retval STM32 uptime tick in milliseconds.
+ */
+uint32_t ADC_GetLastMeasurementTimeMs(void);
+
 #endif
