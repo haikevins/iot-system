@@ -1,5 +1,8 @@
 require('dotenv').config();
 
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
 const express = require('express');
 const cors = require('cors');
 const mqtt = require('mqtt');
@@ -16,7 +19,13 @@ const config = {
   influxUrl: process.env.INFLUX_URL,
   influxToken: process.env.INFLUX_TOKEN,
   influxOrg: process.env.INFLUX_ORG,
-  influxBucket: process.env.INFLUX_BUCKET
+  influxBucket: process.env.INFLUX_BUCKET,
+  ingestOutboxDir: path.resolve(
+    process.env.INGEST_OUTBOX_DIR || path.join(__dirname, '..', 'data', 'influx-outbox')
+  ),
+  influxRetryMs: Number.parseInt(process.env.INFLUX_RETRY_MS || '5000', 10),
+  doneRetentionHours: Number.parseInt(process.env.INGEST_DONE_RETENTION_HOURS || '168', 10),
+  doneMaxEntries: Number.parseInt(process.env.INGEST_DONE_MAX_ENTRIES || '20000', 10)
 };
 
 const requiredVars = ['INFLUX_URL', 'INFLUX_TOKEN', 'INFLUX_ORG', 'INFLUX_BUCKET'];
@@ -29,12 +38,28 @@ if (missingVars.length > 0) {
 
 const app = express();
 const latestByNode = {};
-const recentRecordIds = new Map();
-const MQTT_RECORD_DEDUPE_TTL_MS = 24 * 60 * 60 * 1000;
-const MQTT_RECORD_DEDUPE_MAX_ENTRIES = 4096;
+const outboxPaths = {
+  pending: path.join(config.ingestOutboxDir, 'pending'),
+  done: path.join(config.ingestOutboxDir, 'done'),
+  rejected: path.join(config.ingestOutboxDir, 'rejected')
+};
+
+for (const directoryPath of Object.values(outboxPaths)) {
+  fs.mkdirSync(directoryPath, { recursive: true });
+}
+
 let lastMqttMessageAt = null;
 let mqttSessionPresent = false;
 let duplicateMqttMessageCount = 0;
+let outboxPendingCount = 0;
+let outboxDoneCount = 0;
+let outboxRejectedCount = 0;
+let lastInfluxWriteAt = null;
+let lastInfluxError = null;
+let influxWorkerRunning = false;
+let shuttingDown = false;
+let workerWakeResolver = null;
+let workerPromise = null;
 
 app.use(
   cors({
@@ -53,7 +78,23 @@ const influxDB = new InfluxDB({
   token: config.influxToken
 });
 
-const writeApi = influxDB.getWriteApi(config.influxOrg, config.influxBucket, 'ms');
+/*
+ * Writes are flushed explicitly by the durable outbox worker.  Automatic
+ * batching/retries are disabled so a pending disk record remains the single
+ * source of truth until InfluxDB confirms the HTTP write.
+ */
+const writeApi = influxDB.getWriteApi(
+  config.influxOrg,
+  config.influxBucket,
+  'ms',
+  {
+    batchSize: 2,
+    flushInterval: 0,
+    maxRetries: 0,
+    maxRetryTime: 0,
+    maxBufferLines: 128
+  }
+);
 const queryApi = influxDB.getQueryApi(config.influxOrg);
 
 writeApi.useDefaultTags({ source: 'mqtt-backend' });
@@ -197,29 +238,352 @@ function parseTelemetryPayload(topic, payloadBuffer) {
 }
 
 
-function isDuplicateTelemetry(node, telemetry, receivedAt) {
-  const key = `${node}:${telemetry.recordId}`;
-  const receivedAtMs = receivedAt.getTime();
-  const previousSeenAtMs = recentRecordIds.get(key);
+function getOutboxFileName(node, recordId) {
+  return `${node}-${String(recordId).padStart(16, '0')}.json`;
+}
 
-  if (previousSeenAtMs !== undefined) {
-    recentRecordIds.set(key, receivedAtMs);
+async function fileExists(filePath) {
+  try {
+    await fs.promises.access(filePath, fs.constants.F_OK);
     return true;
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      return false;
+    }
+
+    throw error;
+  }
+}
+
+async function syncDirectory(directoryPath) {
+  let directoryHandle = null;
+
+  try {
+    directoryHandle = await fs.promises.open(directoryPath, 'r');
+    await directoryHandle.sync();
+  } catch (error) {
+    /* Some filesystems do not support fsync on directory descriptors. */
+    if (!['EINVAL', 'ENOTSUP', 'EBADF', 'EPERM'].includes(error.code)) {
+      throw error;
+    }
+  } finally {
+    if (directoryHandle !== null) {
+      await directoryHandle.close();
+    }
+  }
+}
+
+async function writeJsonAtomically(finalPath, value) {
+  const directoryPath = path.dirname(finalPath);
+  const temporaryPath = `${finalPath}.tmp-${process.pid}-${Date.now()}-${Math.random()
+    .toString(16)
+    .slice(2)}`;
+  let fileHandle = null;
+
+  try {
+    fileHandle = await fs.promises.open(temporaryPath, 'wx', 0o600);
+    await fileHandle.writeFile(`${JSON.stringify(value)}\n`, 'utf8');
+    await fileHandle.sync();
+    await fileHandle.close();
+    fileHandle = null;
+
+    await fs.promises.rename(temporaryPath, finalPath);
+    await syncDirectory(directoryPath);
+  } catch (error) {
+    if (fileHandle !== null) {
+      await fileHandle.close().catch(() => {});
+    }
+
+    await fs.promises.unlink(temporaryPath).catch(() => {});
+    throw error;
+  }
+}
+
+async function persistRejectedMessage(topic, payloadBuffer, errorMessage) {
+  const digest = crypto
+    .createHash('sha256')
+    .update(topic)
+    .update('\0')
+    .update(payloadBuffer)
+    .digest('hex');
+  const rejectedPath = path.join(outboxPaths.rejected, `${digest}.json`);
+
+  if (await fileExists(rejectedPath)) {
+    return;
   }
 
-  recentRecordIds.set(key, receivedAtMs);
+  await writeJsonAtomically(rejectedPath, {
+    version: 1,
+    topic,
+    payload: payloadBuffer.toString('utf8'),
+    error: errorMessage,
+    rejectedAt: new Date().toISOString()
+  });
 
-  if (recentRecordIds.size > MQTT_RECORD_DEDUPE_MAX_ENTRIES) {
-    const cutoff = receivedAtMs - MQTT_RECORD_DEDUPE_TTL_MS;
+  outboxRejectedCount += 1;
+}
 
-    for (const [recordKey, seenAtMs] of recentRecordIds.entries()) {
-      if (seenAtMs < cutoff || recentRecordIds.size > MQTT_RECORD_DEDUPE_MAX_ENTRIES) {
-        recentRecordIds.delete(recordKey);
+function wakeInfluxWorker() {
+  if (workerWakeResolver !== null) {
+    const resolve = workerWakeResolver;
+    workerWakeResolver = null;
+    resolve();
+  }
+}
+
+function waitForWorkerWake(timeoutMs) {
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => {
+      if (workerWakeResolver === onWake) {
+        workerWakeResolver = null;
       }
+
+      resolve();
+    }, timeoutMs);
+
+    function onWake() {
+      clearTimeout(timeout);
+      resolve();
+    }
+
+    workerWakeResolver = onWake;
+  });
+}
+
+async function refreshOutboxCounts() {
+  const [pending, done, rejected] = await Promise.all([
+    fs.promises.readdir(outboxPaths.pending),
+    fs.promises.readdir(outboxPaths.done),
+    fs.promises.readdir(outboxPaths.rejected)
+  ]);
+
+  outboxPendingCount = pending.filter((name) => name.endsWith('.json')).length;
+  outboxDoneCount = done.filter((name) => name.endsWith('.json')).length;
+  outboxRejectedCount = rejected.filter((name) => name.endsWith('.json')).length;
+}
+
+async function acceptTelemetryDurably(topic, payloadBuffer) {
+  const match = telemetryTopicRegex.exec(topic);
+
+  if (!match) {
+    return;
+  }
+
+  const node = match[1].toLowerCase();
+  let telemetry;
+
+  try {
+    telemetry = parseTelemetryPayload(topic, payloadBuffer);
+  } catch (error) {
+    /*
+     * A malformed telemetry packet is a poison message: persisting it in a
+     * rejected directory gives us evidence for debugging, then MQTT may ACK it
+     * so the broker does not redeliver the same invalid packet forever.
+     */
+    await persistRejectedMessage(topic, payloadBuffer, error.message);
+    console.error(error.message);
+    return;
+  }
+
+  const receivedAt = new Date();
+  const sampledAt = calculateSampledAt(receivedAt, telemetry);
+  const fileName = getOutboxFileName(node, telemetry.recordId);
+  const pendingPath = path.join(outboxPaths.pending, fileName);
+  const donePath = path.join(outboxPaths.done, fileName);
+
+  if (await fileExists(donePath)) {
+    duplicateMqttMessageCount += 1;
+    lastMqttMessageAt = receivedAt.toISOString();
+    return;
+  }
+
+  if (await fileExists(pendingPath)) {
+    duplicateMqttMessageCount += 1;
+    lastMqttMessageAt = receivedAt.toISOString();
+    wakeInfluxWorker();
+    return;
+  }
+
+  const spoolEntry = {
+    version: 1,
+    node,
+    topic,
+    telemetry,
+    receivedAt: receivedAt.toISOString(),
+    sampledAt: sampledAt === null ? null : sampledAt.toISOString(),
+    enqueuedAt: new Date().toISOString()
+  };
+
+  /*
+   * write -> fsync(file) -> rename -> fsync(directory)
+   * MQTT PUBACK is not allowed until this promise resolves.
+   */
+  await writeJsonAtomically(pendingPath, spoolEntry);
+  outboxPendingCount += 1;
+  lastMqttMessageAt = receivedAt.toISOString();
+
+  if (sampledAt !== null) {
+    updateLatest(node, telemetry, sampledAt, receivedAt);
+  }
+
+  wakeInfluxWorker();
+}
+
+async function movePendingToDone(pendingPath) {
+  const fileName = path.basename(pendingPath);
+  const donePath = path.join(outboxPaths.done, fileName);
+  const doneAlreadyExists = await fileExists(donePath);
+
+  if (doneAlreadyExists) {
+    await fs.promises.unlink(pendingPath).catch((error) => {
+      if (error.code !== 'ENOENT') {
+        throw error;
+      }
+    });
+  } else {
+    await fs.promises.rename(pendingPath, donePath);
+  }
+
+  await Promise.all([
+    syncDirectory(outboxPaths.pending),
+    syncDirectory(outboxPaths.done)
+  ]);
+
+  outboxPendingCount = Math.max(0, outboxPendingCount - 1);
+
+  if (!doneAlreadyExists) {
+    outboxDoneCount += 1;
+  }
+}
+
+async function listPendingFiles() {
+  const names = await fs.promises.readdir(outboxPaths.pending);
+  return names
+    .filter((name) => name.endsWith('.json'))
+    .sort()
+    .map((name) => path.join(outboxPaths.pending, name));
+}
+
+async function readSpoolEntry(filePath) {
+  const content = await fs.promises.readFile(filePath, 'utf8');
+  const entry = JSON.parse(content);
+
+  if (entry?.version !== 1 || typeof entry?.node !== 'string' || !entry?.telemetry) {
+    throw new Error(`Invalid durable outbox entry: ${filePath}`);
+  }
+
+  return entry;
+}
+
+async function writeSpoolEntryToInflux(entry) {
+  const telemetry = entry.telemetry;
+  const sampledAt = entry.sampledAt === null ? null : new Date(entry.sampledAt);
+  const receivedAt = new Date(entry.receivedAt);
+
+  if (sampledAt === null) {
+    writeRecoveredUnstampedPoint(entry.node, telemetry, receivedAt);
+  } else {
+    writeTelemetryPoint(entry.node, telemetry, sampledAt);
+  }
+
+  /*
+   * InfluxDB client writePoint() is buffered. flush() is explicitly awaited so
+   * the disk record is never removed before the HTTP write succeeds.
+   */
+  await writeApi.flush();
+}
+
+async function cleanupDoneReceipts() {
+  const entries = await fs.promises.readdir(outboxPaths.done, { withFileTypes: true });
+  const files = [];
+  const nowMs = Date.now();
+  const retentionMs = Math.max(1, config.doneRetentionHours) * 60 * 60 * 1000;
+
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith('.json')) {
+      continue;
+    }
+
+    const filePath = path.join(outboxPaths.done, entry.name);
+    const stats = await fs.promises.stat(filePath);
+    files.push({ filePath, mtimeMs: stats.mtimeMs });
+  }
+
+  files.sort((left, right) => left.mtimeMs - right.mtimeMs);
+  let removeCount = Math.max(0, files.length - Math.max(100, config.doneMaxEntries));
+
+  for (const file of files) {
+    const expired = nowMs - file.mtimeMs > retentionMs;
+
+    if (!expired && removeCount <= 0) {
+      continue;
+    }
+
+    await fs.promises.unlink(file.filePath).catch((error) => {
+      if (error.code !== 'ENOENT') {
+        throw error;
+      }
+    });
+
+    outboxDoneCount = Math.max(0, outboxDoneCount - 1);
+
+    if (removeCount > 0) {
+      removeCount -= 1;
     }
   }
 
-  return false;
+  await syncDirectory(outboxPaths.done);
+}
+
+async function runInfluxWorker() {
+  influxWorkerRunning = true;
+  let lastCleanupAtMs = 0;
+
+  try {
+    while (!shuttingDown) {
+      const pendingFiles = await listPendingFiles();
+
+      if (pendingFiles.length === 0) {
+        if (Date.now() - lastCleanupAtMs > 60 * 60 * 1000) {
+          await cleanupDoneReceipts().catch((error) => {
+            console.error('Done receipt cleanup failed:', error.message);
+          });
+          lastCleanupAtMs = Date.now();
+        }
+
+        await waitForWorkerWake(1000);
+        continue;
+      }
+
+      let writeFailed = false;
+
+      for (const pendingPath of pendingFiles) {
+        if (shuttingDown) {
+          break;
+        }
+
+        try {
+          const entry = await readSpoolEntry(pendingPath);
+          await writeSpoolEntryToInflux(entry);
+          await movePendingToDone(pendingPath);
+
+          lastInfluxWriteAt = new Date().toISOString();
+          lastInfluxError = null;
+        } catch (error) {
+          lastInfluxError = error.message;
+          console.error('Influx durable write failed:', error.message);
+          writeFailed = true;
+          break;
+        }
+      }
+
+      if (writeFailed) {
+        await waitForWorkerWake(Math.max(1000, config.influxRetryMs));
+      }
+    }
+  } finally {
+    influxWorkerRunning = false;
+  }
 }
 
 function calculateSampledAt(receivedAt, telemetry) {
@@ -324,40 +688,28 @@ function writeRecoveredUnstampedPoint(node, telemetry, receivedAt) {
   writeApi.writePoint(point);
 }
 
-function handleMessage(topic, payloadBuffer) {
-  const match = telemetryTopicRegex.exec(topic);
+/*
+ * MQTT.js sends PUBACK for QoS 1 only after handleMessage() invokes callback.
+ * We override it so the callback is delayed until telemetry is durably fsynced.
+ */
+mqttClient.handleMessage = (packet, callback) => {
+  const topic = Buffer.isBuffer(packet.topic)
+    ? packet.topic.toString()
+    : String(packet.topic || '');
+  const payloadBuffer = Buffer.isBuffer(packet.payload)
+    ? packet.payload
+    : Buffer.from(packet.payload || '');
 
-  if (!match) {
-    return;
-  }
+  acceptTelemetryDurably(topic, payloadBuffer)
+    .then(() => callback())
+    .catch((error) => {
+      lastInfluxError = `Durable MQTT ingest failed: ${error.message}`;
+      console.error(lastInfluxError);
 
-  const node = match[1].toLowerCase();
-
-  try {
-    const telemetry = parseTelemetryPayload(topic, payloadBuffer);
-    const receivedAt = new Date();
-    const sampledAt = calculateSampledAt(receivedAt, telemetry);
-
-    if (isDuplicateTelemetry(node, telemetry, receivedAt)) {
-      duplicateMqttMessageCount += 1;
-      lastMqttMessageAt = receivedAt.toISOString();
-      return;
-    }
-
-    if (sampledAt === null) {
-      writeRecoveredUnstampedPoint(node, telemetry, receivedAt);
-      lastMqttMessageAt = receivedAt.toISOString();
-      return;
-    }
-
-    updateLatest(node, telemetry, sampledAt, receivedAt);
-    writeTelemetryPoint(node, telemetry, sampledAt);
-
-    lastMqttMessageAt = receivedAt.toISOString();
-  } catch (error) {
-    console.error(error.message);
-  }
-}
+      /* No callback success => no PUBACK. Broker will redeliver QoS 1. */
+      callback(error);
+    });
+};
 
 mqttClient.on('connect', (connack) => {
   mqttSessionPresent = Boolean(connack?.sessionPresent);
@@ -377,7 +729,6 @@ mqttClient.on('connect', (connack) => {
   });
 });
 
-mqttClient.on('message', handleMessage);
 mqttClient.on('reconnect', () => console.log('MQTT reconnecting...'));
 mqttClient.on('offline', () => console.log('MQTT offline'));
 mqttClient.on('error', (error) => console.error('MQTT error:', error.message));
@@ -391,7 +742,27 @@ app.get('/health', (_request, response) => {
     mqttClientId: config.mqttClientId,
     lastMessageAt: lastMqttMessageAt,
     influxBucket: config.influxBucket,
+    influxReliabilityMode: 'durable-disk-outbox',
+    influxWorkerRunning,
+    lastInfluxWriteAt,
+    lastInfluxError,
+    outboxPendingCount,
+    outboxDoneCount,
+    outboxRejectedCount,
     duplicateMqttMessageCount
+  });
+});
+
+app.get('/ingest-status', (_request, response) => {
+  response.json({
+    mode: 'durable-disk-outbox',
+    directory: config.ingestOutboxDir,
+    pending: outboxPendingCount,
+    doneReceipts: outboxDoneCount,
+    rejected: outboxRejectedCount,
+    workerRunning: influxWorkerRunning,
+    lastInfluxWriteAt,
+    lastInfluxError
   });
 });
 
@@ -516,15 +887,47 @@ const server = app.listen(config.port, config.host, () => {
   console.log(`Backend listening on http://${displayHost}:${config.port}`);
 });
 
+async function initializeDurableOutbox() {
+  await refreshOutboxCounts();
+  console.log(
+    `Influx durable outbox: pending=${outboxPendingCount}, done=${outboxDoneCount}, ` +
+      `rejected=${outboxRejectedCount}, dir=${config.ingestOutboxDir}`
+  );
+
+  workerPromise = runInfluxWorker().catch((error) => {
+    lastInfluxError = error.message;
+    console.error('Influx worker stopped unexpectedly:', error.message);
+  });
+  wakeInfluxWorker();
+}
+
+initializeDurableOutbox().catch((error) => {
+  console.error('Unable to initialize durable Influx outbox:', error.message);
+  process.exit(1);
+});
+
 async function shutdown() {
+  if (shuttingDown) {
+    return;
+  }
+
+  shuttingDown = true;
   console.log('Shutting down...');
   server.close();
-  mqttClient.end(true);
+  wakeInfluxWorker();
+
+  await new Promise((resolve) => {
+    mqttClient.end(false, {}, resolve);
+  }).catch(() => {});
+
+  if (workerPromise !== null) {
+    await workerPromise.catch(() => {});
+  }
 
   try {
     await writeApi.close();
   } catch (error) {
-    console.error('Influx flush failed:', error.message);
+    console.error('Influx close failed:', error.message);
   }
 
   process.exit(0);
