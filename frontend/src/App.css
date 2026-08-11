@@ -1015,7 +1015,12 @@
 }
 
 .sensor-chip b {
-  font-size: 0.78rem;
+  display: block;
+  font-size: 0.72rem;
+  line-height: 1.15;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .sensor-chip.ok {

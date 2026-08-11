@@ -28,7 +28,12 @@
 #define TYPE_ACK                           0x10U
 #define TYPE_POLL                          0x23U
 
-#define TEMPERATURE_PAYLOAD_LENGTH         3U
+#define SENSOR_COUNT                        6U
+#define LEGACY_TEMPERATURE_PAYLOAD_LENGTH  3U
+#define DETAILED_TEMPERATURE_PAYLOAD_LENGTH (3U + SENSOR_COUNT)
+#define TEMPERATURE_PAYLOAD_LENGTH         DETAILED_TEMPERATURE_PAYLOAD_LENGTH
+#define PAYLOAD_STATUS_INDEX               2U
+#define PAYLOAD_FAULT_BASE_INDEX           3U
 #define TEMPERATURE_INVALID_CENTI_C        ((int16_t)-32768)
 
 #define DATA_WAIT_TIMEOUT_MS               1000UL
@@ -44,7 +49,8 @@
 #define PERSISTENT_OUTBOX_BOOT_KEY           "boot"
 #define PERSISTENT_OUTBOX_CAPACITY           64U
 #define PERSISTENT_RECORD_MAGIC              0x544C4D31UL
-#define PERSISTENT_RECORD_VERSION            1U
+#define PERSISTENT_RECORD_VERSION            2U
+#define LEGACY_PERSISTENT_RECORD_VERSION     1U
 
 #define TIME_SYNC_TIMEOUT_MS                 8000UL
 #define MIN_VALID_UNIX_TIME_SECONDS          1704067200LL
@@ -85,12 +91,34 @@ struct ProtocolPacket
     uint8_t data[MAX_LORA_PAYLOAD];
 };
 
+struct LegacyTelemetryMessageV1
+{
+    uint8_t address;
+    uint8_t sequence;
+    int16_t temperatureCentiCelsius;
+    uint8_t status;
+    uint32_t capturedAtMs;
+    uint32_t bootId;
+    uint64_t sampledAtUnixMs;
+};
+
+struct LegacyPersistentTelemetryRecordV1
+{
+    uint32_t magic;
+    uint16_t version;
+    uint16_t reserved;
+    uint64_t recordId;
+    LegacyTelemetryMessageV1 message;
+};
+
 struct TelemetryMessage
 {
     uint8_t address;
     uint8_t sequence;
     int16_t temperatureCentiCelsius;
     uint8_t status;
+    uint8_t sensorFaults[SENSOR_COUNT];
+    uint8_t faultDetailValid;
     uint32_t capturedAtMs;
     uint32_t bootId;
     uint64_t sampledAtUnixMs;
@@ -124,6 +152,7 @@ static uint32_t s_crcFailureCount = 0UL;
 static uint32_t s_invalidLengthCount = 0UL;
 static uint32_t s_sequenceMismatchCount = 0UL;
 static uint32_t s_duplicateDataCount = 0UL;
+static uint32_t s_faultDetailMismatchCount = 0UL;
 
 /**
  * @brief  Builds the NVS key used by one persistent outbox slot.
@@ -197,40 +226,91 @@ static bool InitializeSystemTime(void)
 }
 
 /**
- * @brief  Reads and validates one persistent telemetry record from NVS.
+ * @brief  Reads one current or legacy persistent telemetry record from NVS.
+ * @note   Version-1 records are converted in RAM with detailed faults marked unknown.
  * @param  slotIndex: Outbox slot index.
- * @param  record: Output record.
- * @retval true when a valid record exists in the slot, otherwise false.
+ * @param  record: Output version-2 record.
+ * @retval true when a valid supported record exists, otherwise false.
  */
 static bool ReadPersistentRecord(uint16_t slotIndex,
     PersistentTelemetryRecord &record)
 {
     char slotKey[8];
-    size_t recordSize = sizeof(record);
+    size_t storedSize = 0U;
 
     if (!BuildOutboxSlotKey(slotIndex, slotKey, sizeof(slotKey)))
     {
         return false;
     }
 
-    const esp_err_t result = nvs_get_blob(s_outboxNvsHandle,
+    esp_err_t result = nvs_get_blob(s_outboxNvsHandle,
         slotKey,
-        &record,
-        &recordSize);
+        nullptr,
+        &storedSize);
 
     if (result != ESP_OK)
     {
         return false;
     }
 
-    if ((recordSize != sizeof(record)) ||
-        (record.magic != PERSISTENT_RECORD_MAGIC) ||
-        (record.version != PERSISTENT_RECORD_VERSION))
+    if (storedSize == sizeof(PersistentTelemetryRecord))
     {
-        return false;
+        PersistentTelemetryRecord currentRecord = {};
+        size_t readSize = sizeof(currentRecord);
+
+        result = nvs_get_blob(s_outboxNvsHandle,
+            slotKey,
+            &currentRecord,
+            &readSize);
+
+        if ((result != ESP_OK) ||
+            (readSize != sizeof(currentRecord)) ||
+            (currentRecord.magic != PERSISTENT_RECORD_MAGIC) ||
+            (currentRecord.version != PERSISTENT_RECORD_VERSION))
+        {
+            return false;
+        }
+
+        record = currentRecord;
+        return true;
     }
 
-    return true;
+    if (storedSize == sizeof(LegacyPersistentTelemetryRecordV1))
+    {
+        LegacyPersistentTelemetryRecordV1 legacyRecord = {};
+        size_t readSize = sizeof(legacyRecord);
+
+        result = nvs_get_blob(s_outboxNvsHandle,
+            slotKey,
+            &legacyRecord,
+            &readSize);
+
+        if ((result != ESP_OK) ||
+            (readSize != sizeof(legacyRecord)) ||
+            (legacyRecord.magic != PERSISTENT_RECORD_MAGIC) ||
+            (legacyRecord.version != LEGACY_PERSISTENT_RECORD_VERSION))
+        {
+            return false;
+        }
+
+        record = {};
+        record.magic = legacyRecord.magic;
+        record.version = PERSISTENT_RECORD_VERSION;
+        record.recordId = legacyRecord.recordId;
+        record.message.address = legacyRecord.message.address;
+        record.message.sequence = legacyRecord.message.sequence;
+        record.message.temperatureCentiCelsius =
+            legacyRecord.message.temperatureCentiCelsius;
+        record.message.status = legacyRecord.message.status;
+        record.message.faultDetailValid = 0U;
+        record.message.capturedAtMs = legacyRecord.message.capturedAtMs;
+        record.message.bootId = legacyRecord.message.bootId;
+        record.message.sampledAtUnixMs = legacyRecord.message.sampledAtUnixMs;
+
+        return true;
+    }
+
+    return false;
 }
 
 /**
@@ -308,7 +388,7 @@ static bool InitializePersistentOutbox(void)
     {
         PersistentTelemetryRecord record = {};
         char slotKey[8];
-        size_t recordSize = sizeof(record);
+        size_t storedSize = 0U;
 
         if (!BuildOutboxSlotKey(slotIndex, slotKey, sizeof(slotKey)))
         {
@@ -317,8 +397,8 @@ static bool InitializePersistentOutbox(void)
 
         result = nvs_get_blob(s_outboxNvsHandle,
             slotKey,
-            &record,
-            &recordSize);
+            nullptr,
+            &storedSize);
 
         if (result == ESP_ERR_NVS_NOT_FOUND)
         {
@@ -327,15 +407,13 @@ static bool InitializePersistentOutbox(void)
 
         if (result != ESP_OK)
         {
-            Serial.printf("Outbox slot %u read failed: %d\n",
+            Serial.printf("Outbox slot %u size read failed: %d\n",
                 (unsigned int)slotIndex,
                 (int)result);
             return false;
         }
 
-        if ((recordSize != sizeof(record)) ||
-            (record.magic != PERSISTENT_RECORD_MAGIC) ||
-            (record.version != PERSISTENT_RECORD_VERSION))
+        if (!ReadPersistentRecord(slotIndex, record))
         {
             Serial.printf("Outbox slot %u is invalid; refusing silent data loss\n",
                 (unsigned int)slotIndex);
@@ -830,6 +908,43 @@ static int16_t DecodeTemperatureCentiCelsius(const uint8_t *payload)
 }
 
 /**
+ * @brief  Checks whether a DATA payload length is supported by the gateway.
+ * @param  payloadLength: DATA payload length.
+ * @retval true for legacy 3-byte or detailed 9-byte telemetry payloads.
+ */
+static bool IsSupportedTemperaturePayloadLength(uint8_t payloadLength)
+{
+    return (payloadLength == LEGACY_TEMPERATURE_PAYLOAD_LENGTH) ||
+        (payloadLength == DETAILED_TEMPERATURE_PAYLOAD_LENGTH);
+}
+
+/**
+ * @brief  Verifies that the summary status mask matches detailed sensor faults.
+ * @param  status: Six-bit summary fault mask.
+ * @param  sensorFaults: Six detailed sensor fault bytes.
+ * @retval true when each status bit matches whether its detailed code is non-zero.
+ */
+static bool ValidateFaultDetailConsistency(uint8_t status,
+    const uint8_t sensorFaults[SENSOR_COUNT])
+{
+    for (uint8_t sensorIndex = 0U;
+         sensorIndex < SENSOR_COUNT;
+         sensorIndex++)
+    {
+        const bool summaryFault =
+            ((status >> sensorIndex) & 0x01U) != 0U;
+        const bool detailedFault = sensorFaults[sensorIndex] != 0U;
+
+        if (summaryFault != detailedFault)
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+/**
  * @brief  Ensures the ESP32 is connected to Wi-Fi.
  * @retval None
  */
@@ -966,9 +1081,7 @@ static bool InitializeMqttClient(void)
 
 /**
  * @brief  Enqueues one durable telemetry record for MQTT QoS 1 delivery.
- * @note   Topic format: iot/<node>/telemetry.
- * @note   sampledAtMs is persisted when an absolute system clock is available.
- * @note   ageMs remains a fallback for records captured and published in one boot.
+ * @note   Detailed faults are sent as six raw fault-code bytes when available.
  * @param  record: Durable outbox record to publish.
  * @retval Positive MQTT message ID on success, or -1 on failure.
  */
@@ -983,9 +1096,10 @@ static int EnqueueTelemetryQos1(const PersistentTelemetryRecord &record)
     }
 
     char telemetryTopic[40];
-    char telemetryPayload[256];
+    char telemetryPayload[448];
     char timestampText[32];
     char ageText[24];
+    char faultArrayText[64];
 
     const bool recovered = message.bootId != s_currentBootId;
     const uint64_t currentUnixMs = GetUnixTimeMs();
@@ -1027,25 +1141,33 @@ static int EnqueueTelemetryQos1(const PersistentTelemetryRecord &record)
         snprintf(ageText, sizeof(ageText), "null");
     }
 
+    if (message.faultDetailValid != 0U)
+    {
+        snprintf(faultArrayText,
+            sizeof(faultArrayText),
+            "[%u,%u,%u,%u,%u,%u]",
+            message.sensorFaults[0],
+            message.sensorFaults[1],
+            message.sensorFaults[2],
+            message.sensorFaults[3],
+            message.sensorFaults[4],
+            message.sensorFaults[5]);
+    }
+    else
+    {
+        snprintf(faultArrayText, sizeof(faultArrayText), "null");
+    }
+
     snprintf(telemetryTopic,
         sizeof(telemetryTopic),
         "iot/%s/telemetry",
         nodeName);
 
+    char temperatureText[20];
+
     if (message.temperatureCentiCelsius == TEMPERATURE_INVALID_CENTI_C)
     {
-        snprintf(telemetryPayload,
-            sizeof(telemetryPayload),
-            "{\"id\":%llu,\"seq\":%u,\"temp\":null,\"tempValid\":false,"
-            "\"status\":%u,\"sampledAtMs\":%s,\"ageMs\":%s,"
-            "\"timestampValid\":%s,\"recovered\":%s}",
-            (unsigned long long)record.recordId,
-            message.sequence,
-            message.status,
-            timestampText,
-            ageText,
-            timestampValid ? "true" : "false",
-            recovered ? "true" : "false");
+        snprintf(temperatureText, sizeof(temperatureText), "null");
     }
     else
     {
@@ -1057,29 +1179,33 @@ static int EnqueueTelemetryQos1(const PersistentTelemetryRecord &record)
             absoluteTemperature = -absoluteTemperature;
         }
 
-        char temperatureText[20];
-
         snprintf(temperatureText,
             sizeof(temperatureText),
             "%s%ld.%02ld",
             isNegative ? "-" : "",
             (long)(absoluteTemperature / 100L),
             (long)(absoluteTemperature % 100L));
-
-        snprintf(telemetryPayload,
-            sizeof(telemetryPayload),
-            "{\"id\":%llu,\"seq\":%u,\"temp\":%s,\"tempValid\":true,"
-            "\"status\":%u,\"sampledAtMs\":%s,\"ageMs\":%s,"
-            "\"timestampValid\":%s,\"recovered\":%s}",
-            (unsigned long long)record.recordId,
-            message.sequence,
-            temperatureText,
-            message.status,
-            timestampText,
-            ageText,
-            timestampValid ? "true" : "false",
-            recovered ? "true" : "false");
     }
+
+    snprintf(telemetryPayload,
+        sizeof(telemetryPayload),
+        "{\"id\":%llu,\"seq\":%u,\"temp\":%s,\"tempValid\":%s,"
+        "\"status\":%u,\"faultDetailValid\":%s,\"faults\":%s,"
+        "\"sampledAtMs\":%s,\"ageMs\":%s,"
+        "\"timestampValid\":%s,\"recovered\":%s}",
+        (unsigned long long)record.recordId,
+        message.sequence,
+        temperatureText,
+        message.temperatureCentiCelsius == TEMPERATURE_INVALID_CENTI_C
+            ? "false"
+            : "true",
+        message.status,
+        message.faultDetailValid != 0U ? "true" : "false",
+        faultArrayText,
+        timestampText,
+        ageText,
+        timestampValid ? "true" : "false",
+        recovered ? "true" : "false");
 
     const int mqttMessageId = esp_mqtt_client_enqueue(g_mqttClient,
         telemetryTopic,
@@ -1107,7 +1233,9 @@ static int EnqueueTelemetryQos1(const PersistentTelemetryRecord &record)
  * @param  address: Node address.
  * @param  sequence: LoRa transaction sequence number.
  * @param  temperatureCentiCelsius: Signed temperature multiplied by 100.
- * @param  status: Six-bit sensor fault mask.
+ * @param  status: Six-bit sensor fault summary mask.
+ * @param  sensorFaults: Six detailed fault-code bytes.
+ * @param  faultDetailValid: true when detailed fault bytes are available.
  * @param  capturedAtMs: Gateway uptime timestamp when the DATA frame was accepted.
  * @retval true when the record is durably committed to NVS, otherwise false.
  */
@@ -1115,6 +1243,8 @@ static bool PersistTelemetry(uint8_t address,
     uint8_t sequence,
     int16_t temperatureCentiCelsius,
     uint8_t status,
+    const uint8_t sensorFaults[SENSOR_COUNT],
+    bool faultDetailValid,
     uint32_t capturedAtMs)
 {
     TelemetryMessage message = {};
@@ -1122,6 +1252,18 @@ static bool PersistTelemetry(uint8_t address,
     message.sequence = sequence;
     message.temperatureCentiCelsius = temperatureCentiCelsius;
     message.status = status;
+    message.faultDetailValid = faultDetailValid ? 1U : 0U;
+
+    if (faultDetailValid)
+    {
+        for (uint8_t sensorIndex = 0U;
+             sensorIndex < SENSOR_COUNT;
+             sensorIndex++)
+        {
+            message.sensorFaults[sensorIndex] = sensorFaults[sensorIndex];
+        }
+    }
+
     message.capturedAtMs = capturedAtMs;
     message.bootId = s_currentBootId;
     message.sampledAtUnixMs = GetUnixTimeMs();
@@ -1152,7 +1294,7 @@ static void AcknowledgeDuplicateRetries(uint8_t address, uint8_t sequence)
         if ((packet.address == address) &&
             (packet.type == TYPE_DATA) &&
             (packet.sequence == sequence) &&
-            (packet.length == TEMPERATURE_PAYLOAD_LENGTH))
+            IsSupportedTemperaturePayloadLength(packet.length))
         {
             s_duplicateDataCount++;
             SendAcknowledgement(address, sequence);
@@ -1319,20 +1461,50 @@ static void LoraTask(void *parameter)
                 }
 
                 if ((packet.type != TYPE_DATA) ||
-                    (packet.length != TEMPERATURE_PAYLOAD_LENGTH))
+                    !IsSupportedTemperaturePayloadLength(packet.length))
                 {
                     continue;
                 }
 
                 const int16_t temperatureCentiCelsius =
                     DecodeTemperatureCentiCelsius(packet.data);
-                const uint8_t status = (uint8_t)(packet.data[2] & 0x3FU);
+                const uint8_t status =
+                    (uint8_t)(packet.data[PAYLOAD_STATUS_INDEX] & 0x3FU);
+                uint8_t sensorFaults[SENSOR_COUNT] = {0U};
+                const bool faultDetailValid =
+                    packet.length == DETAILED_TEMPERATURE_PAYLOAD_LENGTH;
+
+                if (faultDetailValid)
+                {
+                    for (uint8_t sensorIndex = 0U;
+                         sensorIndex < SENSOR_COUNT;
+                         sensorIndex++)
+                    {
+                        sensorFaults[sensorIndex] =
+                            packet.data[PAYLOAD_FAULT_BASE_INDEX + sensorIndex];
+                    }
+
+                    if (!ValidateFaultDetailConsistency(status, sensorFaults))
+                    {
+                        s_faultDetailMismatchCount++;
+
+                        LOGI("[FAULT-DETAIL] node=%02X seq=%u summary/detail mismatch count=%lu\n",
+                            currentNodeAddress,
+                            currentSequence,
+                            (unsigned long)s_faultDetailMismatchCount);
+
+                        continue;
+                    }
+                }
+
                 const uint32_t capturedAtMs = millis();
 
                 const bool persisted = PersistTelemetry(currentNodeAddress,
                     currentSequence,
                     temperatureCentiCelsius,
                     status,
+                    sensorFaults,
+                    faultDetailValid,
                     capturedAtMs);
 
                 if (!persisted)
@@ -1347,19 +1519,21 @@ static void LoraTask(void *parameter)
 
                 if (temperatureCentiCelsius == TEMPERATURE_INVALID_CENTI_C)
                 {
-                    LOGI("[DATA] node=%02X seq=%u temp=INVALID status=%u rssi=%d\n",
+                    LOGI("[DATA] node=%02X seq=%u temp=INVALID status=%u detail=%s rssi=%d\n",
                         currentNodeAddress,
                         currentSequence,
                         status,
+                        faultDetailValid ? "yes" : "no",
                         LoRa.packetRssi());
                 }
                 else
                 {
-                    LOGI("[DATA] node=%02X seq=%u temp_raw=%d status=%u rssi=%d\n",
+                    LOGI("[DATA] node=%02X seq=%u temp_raw=%d status=%u detail=%s rssi=%d\n",
                         currentNodeAddress,
                         currentSequence,
                         temperatureCentiCelsius,
                         status,
+                        faultDetailValid ? "yes" : "no",
                         LoRa.packetRssi());
                 }
 

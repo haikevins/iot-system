@@ -7,7 +7,14 @@
 #define DATA_TRANSMIT_TIMEOUT_MS            1000U
 #define ACK_WAIT_TIMEOUT_MS                 500U
 #define DATA_TRANSMIT_MAX_ATTEMPTS          3U
-#define TEMPERATURE_PAYLOAD_LENGTH          3U
+
+#define SENSOR_COUNT                        6U
+#define TEMPERATURE_PAYLOAD_LENGTH          (3U + SENSOR_COUNT)
+#define PAYLOAD_TEMPERATURE_LSB_INDEX       0U
+#define PAYLOAD_TEMPERATURE_MSB_INDEX       1U
+#define PAYLOAD_STATUS_INDEX                2U
+#define PAYLOAD_FAULT_BASE_INDEX            3U
+
 #define TEMPERATURE_SCALE                   100.0f
 #define TEMPERATURE_INVALID_CENTI_C         ((int16_t)-32768)
 
@@ -81,7 +88,7 @@ static _Bool WaitForAcknowledgement(uint8_t sequence)
 /**
  * @brief  Sends one DATA packet and retries when the matching ACK is not received.
  * @param  sequence: Sequence number copied from the gateway POLL packet.
- * @param  payload: Three-byte temperature/status payload.
+ * @param  payload: Temperature, status and six detailed-fault bytes.
  * @retval 1 when the transaction is acknowledged, otherwise 0.
  */
 static _Bool SendTemperatureWithRetry(uint8_t sequence,
@@ -118,8 +125,9 @@ static _Bool SendTemperatureWithRetry(uint8_t sequence,
 }
 
 /**
- * @brief  Waits for gateway POLL packets and returns temperature DATA with ACK/retry.
- * @note   Protocol format is START | ADDR | TYPE | SEQ | LEN | DATA | CRC8.
+ * @brief  Waits for gateway POLL packets and returns temperature and diagnostics.
+ * @note   DATA payload is TEMP_L | TEMP_H | STATUS | FAULT_S1..FAULT_S6.
+ * @note   Each detailed fault byte contains the low 8 bits of SensorFaultCode.
  * @retval Never returns.
  */
 int main(void)
@@ -135,6 +143,7 @@ int main(void)
         float averageTemperatureCelsius;
         int16_t encodedTemperature;
         uint8_t sensorStatusMask;
+        uint8_t sensorIndex;
         uint8_t transmitPayload[TEMPERATURE_PAYLOAD_LENGTH];
 
         if (!SX1278_ReceivePacket(&receivedPacket, NODE_RECEIVE_TIMEOUT_MS))
@@ -153,9 +162,17 @@ int main(void)
         sensorStatusMask = (uint8_t)(ADC_GetStatusBitmask() & 0x3FU);
         encodedTemperature = EncodeTemperatureCentiCelsius(averageTemperatureCelsius);
 
-        transmitPayload[0] = (uint8_t)((uint16_t)encodedTemperature & 0x00FFU);
-        transmitPayload[1] = (uint8_t)(((uint16_t)encodedTemperature >> 8U) & 0x00FFU);
-        transmitPayload[2] = sensorStatusMask;
+        transmitPayload[PAYLOAD_TEMPERATURE_LSB_INDEX] =
+            (uint8_t)((uint16_t)encodedTemperature & 0x00FFU);
+        transmitPayload[PAYLOAD_TEMPERATURE_MSB_INDEX] =
+            (uint8_t)(((uint16_t)encodedTemperature >> 8U) & 0x00FFU);
+        transmitPayload[PAYLOAD_STATUS_INDEX] = sensorStatusMask;
+
+        for (sensorIndex = 0U; sensorIndex < SENSOR_COUNT; sensorIndex++)
+        {
+            transmitPayload[PAYLOAD_FAULT_BASE_INDEX + sensorIndex] =
+                (uint8_t)(ADC_GetSensorFaultCode(sensorIndex) & 0x00FFU);
+        }
 
         SendTemperatureWithRetry(receivedPacket.seq, transmitPayload);
     }

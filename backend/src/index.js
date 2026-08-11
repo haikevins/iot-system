@@ -70,6 +70,7 @@ const mqttClient = mqtt.connect(config.mqttUrl, {
 
 const telemetryTopicRegex = /^iot\/(node\d{2})\/telemetry$/i;
 const telemetryTopic = 'iot/+/telemetry';
+const SENSOR_COUNT = 6;
 
 function clampInteger(value, fallback, minimum, maximum) {
   const parsed = Number.parseInt(value, 10);
@@ -99,6 +100,9 @@ function parseTelemetryPayload(topic, payloadBuffer) {
   const status = payload?.status;
   const temperatureValid = payload?.tempValid;
   const temperature = payload?.temp;
+  const sensorFaults = payload?.faults ?? null;
+  const faultDetailValid =
+    payload?.faultDetailValid ?? Array.isArray(sensorFaults);
   const sampledAtMs = payload?.sampledAtMs ?? null;
   const sampleAgeMs = payload?.ageMs ?? null;
   const timestampValid = payload?.timestampValid ?? true;
@@ -114,6 +118,33 @@ function parseTelemetryPayload(topic, payloadBuffer) {
 
   if (!Number.isInteger(status) || status < 0 || status > 0x3f) {
     throw new Error(`Invalid status for ${topic}`);
+  }
+
+  if (typeof faultDetailValid !== 'boolean') {
+    throw new Error(`Invalid faultDetailValid for ${topic}`);
+  }
+
+  if (faultDetailValid) {
+    if (!Array.isArray(sensorFaults) || sensorFaults.length !== SENSOR_COUNT) {
+      throw new Error(`faultDetailValid=true requires ${SENSOR_COUNT} fault codes for ${topic}`);
+    }
+
+    for (let sensorIndex = 0; sensorIndex < SENSOR_COUNT; sensorIndex += 1) {
+      const faultCode = sensorFaults[sensorIndex];
+
+      if (!Number.isInteger(faultCode) || faultCode < 0 || faultCode > 0xff) {
+        throw new Error(`Invalid fault code S${sensorIndex + 1} for ${topic}`);
+      }
+
+      const summaryFault = ((status >> sensorIndex) & 0x01) === 1;
+      const detailedFault = faultCode !== 0;
+
+      if (summaryFault !== detailedFault) {
+        throw new Error(`Status/fault detail mismatch at S${sensorIndex + 1} for ${topic}`);
+      }
+    }
+  } else if (sensorFaults !== null) {
+    throw new Error(`faultDetailValid=false requires faults=null for ${topic}`);
   }
 
   if (typeof temperatureValid !== 'boolean') {
@@ -154,6 +185,8 @@ function parseTelemetryPayload(topic, payloadBuffer) {
     recordId,
     sequence,
     status,
+    faultDetailValid,
+    sensorFaults: faultDetailValid ? sensorFaults.map(Number) : null,
     temperatureValid,
     temperature: temperatureValid ? Number(temperature) : null,
     sampledAtMs,
@@ -222,6 +255,8 @@ function updateLatest(node, telemetry, sampledAt, receivedAt) {
     temp_avg: telemetry.temperatureValid ? telemetry.temperature : null,
     tempValid: telemetry.temperatureValid,
     status: telemetry.status,
+    faultDetailValid: telemetry.faultDetailValid,
+    faults: telemetry.sensorFaults,
     sampleAgeMs: telemetry.sampleAgeMs,
     sampledAt: sampledAt.toISOString(),
     lastSeenAt: sampledAt.toISOString(),
@@ -241,6 +276,7 @@ function writeTelemetryPoint(node, telemetry, sampledAt) {
     .intField('record_id', telemetry.recordId)
     .intField('seq', telemetry.sequence)
     .intField('status', telemetry.status)
+    .booleanField('fault_detail_valid', telemetry.faultDetailValid)
     .booleanField('temp_valid', telemetry.temperatureValid)
     .booleanField('recovered', telemetry.recovered)
     .booleanField('timestamp_valid', true)
@@ -248,6 +284,12 @@ function writeTelemetryPoint(node, telemetry, sampledAt) {
 
   if (telemetry.sampleAgeMs !== null) {
     point.intField('age_ms', telemetry.sampleAgeMs);
+  }
+
+  if (telemetry.faultDetailValid) {
+    telemetry.sensorFaults.forEach((faultCode, sensorIndex) => {
+      point.intField(`fault_s${sensorIndex + 1}`, faultCode);
+    });
   }
 
   if (telemetry.temperatureValid) {
@@ -263,10 +305,17 @@ function writeRecoveredUnstampedPoint(node, telemetry, receivedAt) {
     .intField('record_id', telemetry.recordId)
     .intField('seq', telemetry.sequence)
     .intField('status', telemetry.status)
+    .booleanField('fault_detail_valid', telemetry.faultDetailValid)
     .booleanField('temp_valid', telemetry.temperatureValid)
     .booleanField('recovered', true)
     .booleanField('timestamp_valid', false)
     .timestamp(receivedAt);
+
+  if (telemetry.faultDetailValid) {
+    telemetry.sensorFaults.forEach((faultCode, sensorIndex) => {
+      point.intField(`fault_s${sensorIndex + 1}`, faultCode);
+    });
+  }
 
   if (telemetry.temperatureValid) {
     point.floatField('temp_avg', telemetry.temperature);

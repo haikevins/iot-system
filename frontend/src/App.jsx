@@ -74,6 +74,52 @@ function decodeSensorBits(statusByte) {
   return SENSOR_IDS.map((bit) => ((statusByte >> bit) & 0x01) === 1);
 }
 
+const COMMON_SENSOR_FAULT_LABELS = [
+  [0x01, 'Short'],
+  [0x04, 'Noisy'],
+  [0x08, 'Resistance'],
+  [0x10, 'Temp range'],
+  [0x20, 'Rate'],
+  [0x40, 'Cross sensor'],
+  [0x80, 'Model']
+];
+
+function decodeSensorFaultLabels(nodeId, faultCode) {
+  if (!Number.isInteger(faultCode)) {
+    return null;
+  }
+
+  if (faultCode === 0) {
+    return [];
+  }
+
+  const labels = [];
+
+  if ((faultCode & 0x02) !== 0) {
+    labels.push(nodeId === 'node03' ? 'High saturation' : 'Open');
+  }
+
+  COMMON_SENSOR_FAULT_LABELS.forEach(([flag, label]) => {
+    if ((faultCode & flag) !== 0) {
+      labels.push(label);
+    }
+  });
+
+  return labels.length > 0 ? labels : ['Fault'];
+}
+
+function formatSensorFaultSummary(labels) {
+  if (!Array.isArray(labels)) {
+    return 'Fault';
+  }
+
+  if (labels.length === 0) {
+    return 'OK';
+  }
+
+  return labels.length === 1 ? labels[0] : `${labels[0]} +${labels.length - 1}`;
+}
+
 function formatNodeName(nodeId) {
   return nodeId.replace('node', 'Node ');
 }
@@ -296,6 +342,19 @@ function App() {
         const sensorFaultBits = statusKnown
           ? decodeSensorBits(status)
           : SENSOR_IDS.map(() => null);
+        const faultDetailKnown =
+          online &&
+          nodeData.faultDetailValid === true &&
+          Array.isArray(nodeData.faults) &&
+          nodeData.faults.length === SENSOR_IDS.length;
+        const sensorFaultCodes = faultDetailKnown
+          ? nodeData.faults.map((faultCode) =>
+              Number.isInteger(faultCode) ? faultCode : null
+            )
+          : SENSOR_IDS.map(() => null);
+        const sensorFaultLabels = sensorFaultCodes.map((faultCode) =>
+          decodeSensorFaultLabels(nodeId, faultCode)
+        );
         const faults = sensorFaultBits.filter((value) => value === true).length;
         const unknownSensors = sensorFaultBits.filter((value) => value === null).length;
 
@@ -309,6 +368,9 @@ function App() {
           lastSeenAt: nodeData.lastSeenAt || null,
           tempUpdatedAt: nodeData.tempUpdatedAt || null,
           sensorFaultBits,
+          sensorFaultCodes,
+          sensorFaultLabels,
+          faultDetailKnown,
           faults,
           unknownSensors
         };
@@ -659,14 +721,27 @@ function App() {
                           {SENSOR_IDS.map((sensorId) => {
                             const isFault = node.sensorFaultBits[sensorId];
                             const unknown = isFault === null;
+                            const detailedLabels = node.sensorFaultLabels[sensorId];
+                            const faultSummary =
+                              isFault && Array.isArray(detailedLabels)
+                                ? formatSensorFaultSummary(detailedLabels)
+                                : isFault
+                                  ? 'Fault'
+                                  : 'OK';
+                            const faultTitle =
+                              isFault && Array.isArray(detailedLabels) && detailedLabels.length > 0
+                                ? detailedLabels.join(', ')
+                                : undefined;
+
                             return (
                               <div
                                 className={`sensor-chip ${unknown ? 'unknown' : isFault ? 'fault' : 'ok'}`}
                                 key={sensorId}
                                 style={{ '--chip-delay': `${sensorId * 45}ms` }}
+                                title={faultTitle}
                               >
-                                <span>S{sensorId}</span>
-                                <b>{unknown ? 'Unknown' : isFault ? 'Fault' : 'OK'}</b>
+                                <span>S{sensorId + 1}</span>
+                                <b>{unknown ? 'Unknown' : faultSummary}</b>
                               </div>
                             );
                           })}
