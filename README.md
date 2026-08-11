@@ -6,6 +6,13 @@ The project is designed as more than a basic sensor demo. Its main focus is **re
 
 ***
 
+## Demo Video
+
+/home/hai/Documents/Project/iot-system/docs/videos/demo-web-mobile.mp4
+/home/hai/Documents/Project/iot-system/docs/videos/web-demo-laptop.webm
+
+***
+
 ## Table of Contents
 
 1. [Project Overview](#project-overview)
