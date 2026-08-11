@@ -1,14 +1,21 @@
 #include <SPI.h>
 #include <LoRa.h>
 #include <WiFi.h>
+#include <LittleFS.h>
+#include <FS.h>
 #include <mqtt_client.h>
 #include <nvs.h>
 #include <nvs_flash.h>
+#include <esp_mac.h>
+#include <esp_system.h>
+#include <esp_partition.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/semphr.h>
 #include <time.h>
 #include <sys/time.h>
+#include <stddef.h>
+#include <string.h>
 
 #if __has_include("secrets.h")
 #include "secrets.h"
@@ -61,14 +68,22 @@
 #define MQTT_ACK_WATCHDOG_MS                 60000UL
 #define MQTT_RETRANSMIT_TIMEOUT_MS           3000
 
-#define PERSISTENT_OUTBOX_NAMESPACE          "tel_outbox"
-#define PERSISTENT_OUTBOX_BOOT_KEY           "boot"
-#define PERSISTENT_OUTBOX_CAPACITY           64U
-#define PERSISTENT_RECORD_MAGIC              0x544C4D31UL
-#define PERSISTENT_RECORD_VERSION            2U
-#define LEGACY_PERSISTENT_RECORD_VERSION     1U
+#define LEGACY_NVS_OUTBOX_NAMESPACE          "tel_outbox"
+#define LEGACY_NVS_OUTBOX_BOOT_KEY           "boot"
+#define LEGACY_NVS_OUTBOX_CAPACITY           64U
+#define LEGACY_PERSISTENT_RECORD_MAGIC        0x544C4D31UL
+#define LEGACY_PERSISTENT_RECORD_VERSION_V1  1U
+#define LEGACY_PERSISTENT_RECORD_VERSION_V2  2U
 
-#define TIME_SYNC_TIMEOUT_MS                 8000UL
+#define FILE_OUTBOX_DIRECTORY                "/outbox"
+#define FILE_OUTBOX_MAX_RECORDS              2048U
+#define FILE_OUTBOX_MIN_FREE_BYTES           (128U * 1024U)
+#define FILE_OUTBOX_RECORD_MAGIC             0x544C4D46UL
+#define FILE_OUTBOX_RECORD_VERSION           3U
+#define FILE_OUTBOX_RECORD_ID_LENGTH         56U
+
+#define WIFI_RECONNECT_INTERVAL_MS           5000UL
+#define TIME_SYNC_STATUS_LOG_INTERVAL_MS     10000UL
 #define MIN_VALID_UNIX_TIME_SECONDS          1704067200LL
 #define NTP_SERVER_PRIMARY                   "pool.ntp.org"
 #define NTP_SERVER_SECONDARY                 "time.google.com"
@@ -119,7 +134,7 @@ struct LegacyPersistentTelemetryRecordV1
     LegacyTelemetryMessageV1 message;
 };
 
-struct TelemetryMessage
+struct LegacyTelemetryMessageV2
 {
     uint8_t address;
     uint8_t sequence;
@@ -132,12 +147,47 @@ struct TelemetryMessage
     uint64_t sampledAtUnixMs;
 };
 
-struct PersistentTelemetryRecord
+struct LegacyPersistentTelemetryRecordV2
 {
     uint32_t magic;
     uint16_t version;
     uint16_t reserved;
     uint64_t recordId;
+    LegacyTelemetryMessageV2 message;
+};
+
+struct TelemetryMessage
+{
+    uint8_t address;
+    uint8_t sequence;
+    int16_t temperatureCentiCelsius;
+    uint8_t status;
+    uint8_t sensorFaults[SENSOR_COUNT];
+    uint8_t faultDetailValid;
+    uint8_t nodeSampleAgeValid;
+    uint16_t reserved;
+    uint32_t capturedAtMs;
+    uint32_t nodeSampleAgeMs;
+    uint64_t captureBootNonce;
+    uint64_t sampledAtUnixMs;
+};
+
+struct PersistentTelemetryRecord
+{
+    uint32_t magic;
+    uint16_t version;
+    uint16_t recordSize;
+    uint64_t queueSequence;
+    char recordId[FILE_OUTBOX_RECORD_ID_LENGTH];
+    TelemetryMessage message;
+    uint32_t checksum;
+};
+
+struct LegacyMigrationRecord
+{
+    bool used;
+    uint16_t slotIndex;
+    uint64_t legacyRecordId;
     TelemetryMessage message;
 };
 
@@ -145,12 +195,18 @@ esp_mqtt_client_handle_t g_mqttClient = nullptr;
 TaskHandle_t g_mqttTaskHandle = nullptr;
 SemaphoreHandle_t g_outboxMutex = nullptr;
 
-static nvs_handle_t s_outboxNvsHandle = 0;
-static bool s_outboxSlotUsed[PERSISTENT_OUTBOX_CAPACITY] = {false};
-static uint64_t s_outboxSlotRecordId[PERSISTENT_OUTBOX_CAPACITY] = {0ULL};
-static uint16_t s_outboxCount = 0U;
-static uint32_t s_currentBootId = 0UL;
-static uint32_t s_nextRecordCounter = 1UL;
+static uint32_t s_outboxCount = 0U;
+static uint64_t s_oldestQueueSequence = 0ULL;
+static uint64_t s_newestQueueSequence = 0ULL;
+static uint64_t s_nextQueueSequence = 1ULL;
+static uint64_t s_bootNonce = 0ULL;
+static char s_gatewayDeviceId[13] = {0};
+static bool s_mqttInitialized = false;
+static bool s_wifiWasConnected = false;
+static bool s_timeSyncConfigured = false;
+static bool s_timeSyncAnnounced = false;
+static unsigned long s_lastWiFiAttemptMs = 0UL;
+static unsigned long s_lastTimeStatusLogMs = 0UL;
 
 static volatile bool s_mqttConnected = false;
 
@@ -163,19 +219,19 @@ static uint32_t s_duplicateDataCount = 0UL;
 static uint32_t s_faultDetailMismatchCount = 0UL;
 
 /**
- * @brief  Builds the NVS key used by one persistent outbox slot.
- * @param  slotIndex: Outbox slot index.
+ * @brief  Builds the legacy NVS key used by one v5 outbox slot.
+ * @param  slotIndex: Legacy outbox slot index.
  * @param  keyBuffer: Output buffer for the NVS key.
  * @param  keyBufferSize: Size of keyBuffer.
  * @retval true when the key was created successfully, otherwise false.
  */
-static bool BuildOutboxSlotKey(uint16_t slotIndex,
+static bool BuildLegacyNvsSlotKey(uint16_t slotIndex,
     char *keyBuffer,
     size_t keyBufferSize)
 {
     if ((keyBuffer == nullptr) ||
         (keyBufferSize < 5U) ||
-        (slotIndex >= PERSISTENT_OUTBOX_CAPACITY))
+        (slotIndex >= LEGACY_NVS_OUTBOX_CAPACITY))
     {
         return false;
     }
@@ -207,316 +263,605 @@ static uint64_t GetUnixTimeMs(void)
 }
 
 /**
- * @brief  Starts SNTP synchronization and waits briefly for a valid wall clock.
- * @note   Failure to synchronize does not stop telemetry. The gateway falls back
- *         to ageMs while the record remains in the current boot session.
- * @retval true when a valid Unix clock is available, otherwise false.
+ * @brief  Starts SNTP without blocking LoRa acquisition.
+ * @note   SNTP is configured only after Wi-Fi becomes available.
+ * @retval None
  */
-static bool InitializeSystemTime(void)
+static void ConfigureSystemTimeIfNeeded(void)
 {
+    if (s_timeSyncConfigured)
+    {
+        return;
+    }
+
     configTime(0, 0, NTP_SERVER_PRIMARY, NTP_SERVER_SECONDARY);
-
-    const unsigned long startTimeMs = millis();
-
-    while ((millis() - startTimeMs) < TIME_SYNC_TIMEOUT_MS)
-    {
-        if (GetUnixTimeMs() != 0ULL)
-        {
-            Serial.println("System time synchronized");
-            return true;
-        }
-
-        vTaskDelay(pdMS_TO_TICKS(200));
-    }
-
-    Serial.println("System time not synchronized; using uptime fallback");
-    return false;
+    s_timeSyncConfigured = true;
+    s_lastTimeStatusLogMs = millis();
+    Serial.println("SNTP configured in background");
 }
 
 /**
- * @brief  Reads one current or legacy persistent telemetry record from NVS.
- * @note   Version-1 records are converted in RAM with detailed faults marked unknown.
- * @param  slotIndex: Outbox slot index.
- * @param  record: Output version-2 record.
- * @retval true when a valid supported record exists, otherwise false.
+ * @brief  Logs when a valid wall clock becomes available.
+ * @retval None
  */
-static bool ReadPersistentRecord(uint16_t slotIndex,
-    PersistentTelemetryRecord &record)
+static void MonitorSystemTime(void)
 {
-    char slotKey[8];
-    size_t storedSize = 0U;
-
-    if (!BuildOutboxSlotKey(slotIndex, slotKey, sizeof(slotKey)))
+    if (!s_timeSyncConfigured || s_timeSyncAnnounced)
     {
-        return false;
+        return;
     }
 
-    esp_err_t result = nvs_get_blob(s_outboxNvsHandle,
-        slotKey,
-        nullptr,
-        &storedSize);
-
-    if (result != ESP_OK)
+    if (GetUnixTimeMs() != 0ULL)
     {
-        return false;
+        s_timeSyncAnnounced = true;
+        Serial.println("System time synchronized");
+        return;
     }
 
-    if (storedSize == sizeof(PersistentTelemetryRecord))
+    if ((millis() - s_lastTimeStatusLogMs) >= TIME_SYNC_STATUS_LOG_INTERVAL_MS)
     {
-        PersistentTelemetryRecord currentRecord = {};
-        size_t readSize = sizeof(currentRecord);
-
-        result = nvs_get_blob(s_outboxNvsHandle,
-            slotKey,
-            &currentRecord,
-            &readSize);
-
-        if ((result != ESP_OK) ||
-            (readSize != sizeof(currentRecord)) ||
-            (currentRecord.magic != PERSISTENT_RECORD_MAGIC) ||
-            (currentRecord.version != PERSISTENT_RECORD_VERSION))
-        {
-            return false;
-        }
-
-        record = currentRecord;
-        return true;
+        s_lastTimeStatusLogMs = millis();
+        LOGI("System time still unsynchronized; sample age is preserved durably\n");
     }
-
-    if (storedSize == sizeof(LegacyPersistentTelemetryRecordV1))
-    {
-        LegacyPersistentTelemetryRecordV1 legacyRecord = {};
-        size_t readSize = sizeof(legacyRecord);
-
-        result = nvs_get_blob(s_outboxNvsHandle,
-            slotKey,
-            &legacyRecord,
-            &readSize);
-
-        if ((result != ESP_OK) ||
-            (readSize != sizeof(legacyRecord)) ||
-            (legacyRecord.magic != PERSISTENT_RECORD_MAGIC) ||
-            (legacyRecord.version != LEGACY_PERSISTENT_RECORD_VERSION))
-        {
-            return false;
-        }
-
-        record = {};
-        record.magic = legacyRecord.magic;
-        record.version = PERSISTENT_RECORD_VERSION;
-        record.recordId = legacyRecord.recordId;
-        record.message.address = legacyRecord.message.address;
-        record.message.sequence = legacyRecord.message.sequence;
-        record.message.temperatureCentiCelsius =
-            legacyRecord.message.temperatureCentiCelsius;
-        record.message.status = legacyRecord.message.status;
-        record.message.faultDetailValid = 0U;
-        record.message.capturedAtMs = legacyRecord.message.capturedAtMs;
-        record.message.bootId = legacyRecord.message.bootId;
-        record.message.sampledAtUnixMs = legacyRecord.message.sampledAtUnixMs;
-
-        return true;
-    }
-
-    return false;
 }
 
 /**
- * @brief  Initializes the flash-backed telemetry outbox and restores queued records.
- * @note   NVS records are individual atomic entries. A DATA frame is ACKed only
- *         after its record has been committed successfully.
- * @retval true when the outbox is ready, otherwise false.
+ * @brief  Calculates CRC32 for one persistent record.
+ * @param  data: Input bytes.
+ * @param  length: Number of bytes to process.
+ * @retval IEEE CRC32 value.
  */
-static bool InitializePersistentOutbox(void)
+static uint32_t CalculateCrc32(const uint8_t *data, size_t length)
 {
-    esp_err_t result = nvs_flash_init();
+    uint32_t crc = 0xFFFFFFFFUL;
 
-    if (result != ESP_OK)
+    for (size_t byteIndex = 0U; byteIndex < length; byteIndex++)
     {
-        Serial.printf("NVS init failed: %d\n", (int)result);
-        return false;
-    }
+        crc ^= (uint32_t)data[byteIndex];
 
-    result = nvs_open(PERSISTENT_OUTBOX_NAMESPACE,
-        NVS_READWRITE,
-        &s_outboxNvsHandle);
-
-    if (result != ESP_OK)
-    {
-        Serial.printf("Outbox NVS open failed: %d\n", (int)result);
-        return false;
-    }
-
-    g_outboxMutex = xSemaphoreCreateMutex();
-
-    if (g_outboxMutex == nullptr)
-    {
-        Serial.println("Outbox mutex create failed");
-        return false;
-    }
-
-    uint32_t previousBootId = 0UL;
-    result = nvs_get_u32(s_outboxNvsHandle,
-        PERSISTENT_OUTBOX_BOOT_KEY,
-        &previousBootId);
-
-    if ((result != ESP_OK) && (result != ESP_ERR_NVS_NOT_FOUND))
-    {
-        Serial.printf("Outbox boot counter read failed: %d\n", (int)result);
-        return false;
-    }
-
-    s_currentBootId = previousBootId + 1UL;
-
-    if (s_currentBootId == 0UL)
-    {
-        s_currentBootId = 1UL;
-    }
-
-    result = nvs_set_u32(s_outboxNvsHandle,
-        PERSISTENT_OUTBOX_BOOT_KEY,
-        s_currentBootId);
-
-    if (result == ESP_OK)
-    {
-        result = nvs_commit(s_outboxNvsHandle);
-    }
-
-    if (result != ESP_OK)
-    {
-        Serial.printf("Outbox boot counter commit failed: %d\n", (int)result);
-        return false;
-    }
-
-    s_outboxCount = 0U;
-
-    for (uint16_t slotIndex = 0U;
-         slotIndex < PERSISTENT_OUTBOX_CAPACITY;
-         slotIndex++)
-    {
-        PersistentTelemetryRecord record = {};
-        char slotKey[8];
-        size_t storedSize = 0U;
-
-        if (!BuildOutboxSlotKey(slotIndex, slotKey, sizeof(slotKey)))
+        for (uint8_t bitIndex = 0U; bitIndex < 8U; bitIndex++)
         {
-            return false;
+            const uint32_t mask = (uint32_t)(-(int32_t)(crc & 1UL));
+            crc = (crc >> 1U) ^ (0xEDB88320UL & mask);
         }
-
-        result = nvs_get_blob(s_outboxNvsHandle,
-            slotKey,
-            nullptr,
-            &storedSize);
-
-        if (result == ESP_ERR_NVS_NOT_FOUND)
-        {
-            continue;
-        }
-
-        if (result != ESP_OK)
-        {
-            Serial.printf("Outbox slot %u size read failed: %d\n",
-                (unsigned int)slotIndex,
-                (int)result);
-            return false;
-        }
-
-        if (!ReadPersistentRecord(slotIndex, record))
-        {
-            Serial.printf("Outbox slot %u is invalid; refusing silent data loss\n",
-                (unsigned int)slotIndex);
-            return false;
-        }
-
-        s_outboxSlotUsed[slotIndex] = true;
-        s_outboxSlotRecordId[slotIndex] = record.recordId;
-        s_outboxCount++;
     }
 
-    Serial.printf("Persistent outbox ready: restored=%u capacity=%u boot=%lu\n",
-        (unsigned int)s_outboxCount,
-        (unsigned int)PERSISTENT_OUTBOX_CAPACITY,
-        (unsigned long)s_currentBootId);
+    return ~crc;
+}
+
+/**
+ * @brief  Creates a stable gateway device identifier and a per-boot random nonce.
+ * @retval true when the factory MAC was read successfully, otherwise false.
+ */
+static bool InitializeGatewayIdentity(void)
+{
+    uint8_t baseMac[6] = {0U};
+
+    if (esp_efuse_mac_get_default(baseMac) != ESP_OK)
+    {
+        Serial.println("Unable to read ESP32 eFuse MAC");
+        return false;
+    }
+
+    snprintf(s_gatewayDeviceId,
+        sizeof(s_gatewayDeviceId),
+        "%02x%02x%02x%02x%02x%02x",
+        baseMac[0],
+        baseMac[1],
+        baseMac[2],
+        baseMac[3],
+        baseMac[4],
+        baseMac[5]);
+
+    s_bootNonce = ((uint64_t)esp_random() << 32U) | (uint64_t)esp_random();
+
+    if (s_bootNonce == 0ULL)
+    {
+        s_bootNonce = 1ULL;
+    }
+
+    LOGI("Gateway identity=%s bootNonce=%016llx\n",
+        s_gatewayDeviceId,
+        (unsigned long long)s_bootNonce);
 
     return true;
 }
 
 /**
- * @brief  Persists one telemetry record before acknowledging the STM32 node.
- * @param  message: Telemetry message to store.
- * @retval true when the NVS commit completed successfully, otherwise false.
+ * @brief  Checks whether the default filesystem partition is still erased.
+ * @note   This is used to distinguish first-time initialization from a damaged
+ *         existing filesystem. Existing non-blank data is never auto-formatted.
+ * @retval true when every byte is 0xFF, otherwise false.
  */
-static bool PersistentOutboxPush(const TelemetryMessage &message)
+static bool IsLittleFsPartitionBlank(void)
+{
+    const esp_partition_t *partition = esp_partition_find_first(
+        ESP_PARTITION_TYPE_DATA,
+        ESP_PARTITION_SUBTYPE_DATA_SPIFFS,
+        "spiffs");
+
+    if (partition == nullptr)
+    {
+        return false;
+    }
+
+    uint8_t buffer[256];
+
+    for (size_t offset = 0U; offset < partition->size; offset += sizeof(buffer))
+    {
+        const size_t bytesToRead =
+            ((partition->size - offset) < sizeof(buffer))
+                ? (partition->size - offset)
+                : sizeof(buffer);
+
+        if (esp_partition_read(partition, offset, buffer, bytesToRead) != ESP_OK)
+        {
+            return false;
+        }
+
+        for (size_t byteIndex = 0U; byteIndex < bytesToRead; byteIndex++)
+        {
+            if (buffer[byteIndex] != 0xFFU)
+            {
+                return false;
+            }
+        }
+    }
+
+    return true;
+}
+
+/**
+ * @brief  Mounts the LittleFS telemetry partition without silently erasing data.
+ * @retval true when LittleFS is ready, otherwise false.
+ */
+static bool MountTelemetryFilesystem(void)
+{
+    if (!LittleFS.begin(false))
+    {
+        if (!IsLittleFsPartitionBlank())
+        {
+            Serial.println("LittleFS mount failed on non-blank partition; refusing auto-format");
+            return false;
+        }
+
+        Serial.println("LittleFS partition is blank; formatting first-use filesystem");
+
+        if (!LittleFS.begin(true))
+        {
+            Serial.println("LittleFS first-use format/mount failed");
+            return false;
+        }
+    }
+
+    if (!LittleFS.exists(FILE_OUTBOX_DIRECTORY) &&
+        !LittleFS.mkdir(FILE_OUTBOX_DIRECTORY))
+    {
+        Serial.println("Unable to create LittleFS outbox directory");
+        return false;
+    }
+
+    return true;
+}
+
+/**
+ * @brief  Builds one LittleFS path from a queue sequence.
+ * @param  queueSequence: Monotonic sequence of the durable record.
+ * @param  temporary: true for the pre-commit temporary file.
+ * @param  pathBuffer: Output path buffer.
+ * @param  pathBufferSize: Size of pathBuffer.
+ * @retval true when the path fits the output buffer, otherwise false.
+ */
+static bool BuildOutboxRecordPath(uint64_t queueSequence,
+    bool temporary,
+    char *pathBuffer,
+    size_t pathBufferSize)
+{
+    if ((pathBuffer == nullptr) || (pathBufferSize < 40U))
+    {
+        return false;
+    }
+
+    const int written = snprintf(pathBuffer,
+        pathBufferSize,
+        "%s/q%020llu.%s",
+        FILE_OUTBOX_DIRECTORY,
+        (unsigned long long)queueSequence,
+        temporary ? "tmp" : "rec");
+
+    return (written > 0) && ((size_t)written < pathBufferSize);
+}
+
+/**
+ * @brief  Verifies the integrity and schema of one file-backed record.
+ * @param  record: Record to validate.
+ * @retval true when the record is valid, otherwise false.
+ */
+static bool ValidatePersistentRecord(const PersistentTelemetryRecord &record)
+{
+    if ((record.magic != FILE_OUTBOX_RECORD_MAGIC) ||
+        (record.version != FILE_OUTBOX_RECORD_VERSION) ||
+        (record.recordSize != sizeof(PersistentTelemetryRecord)) ||
+        (record.queueSequence == 0ULL) ||
+        (record.recordId[0] == '\0'))
+    {
+        return false;
+    }
+
+    const uint32_t expectedChecksum = CalculateCrc32(
+        (const uint8_t *)&record,
+        offsetof(PersistentTelemetryRecord, checksum));
+
+    return expectedChecksum == record.checksum;
+}
+
+/**
+ * @brief  Reads and validates one LittleFS persistent record.
+ * @param  path: Record file path.
+ * @param  record: Output record.
+ * @retval true when the file contains a valid record, otherwise false.
+ */
+static bool ReadPersistentRecordFile(const char *path,
+    PersistentTelemetryRecord &record)
+{
+    File file = LittleFS.open(path, FILE_READ);
+
+    if (!file || file.isDirectory() ||
+        (file.size() != sizeof(PersistentTelemetryRecord)))
+    {
+        if (file)
+        {
+            file.close();
+        }
+
+        return false;
+    }
+
+    record = {};
+    const size_t bytesRead = file.read(
+        (uint8_t *)&record,
+        sizeof(PersistentTelemetryRecord));
+    file.close();
+
+    return (bytesRead == sizeof(PersistentTelemetryRecord)) &&
+        ValidatePersistentRecord(record);
+}
+
+/**
+ * @brief  Writes one durable LittleFS record using temp-file then rename commit.
+ * @param  record: Fully populated record with checksum.
+ * @retval true only after the final file can be read and validated.
+ */
+static bool WritePersistentRecordFile(const PersistentTelemetryRecord &record)
+{
+    char temporaryPath[64];
+    char finalPath[64];
+
+    if (!BuildOutboxRecordPath(record.queueSequence,
+            true,
+            temporaryPath,
+            sizeof(temporaryPath)) ||
+        !BuildOutboxRecordPath(record.queueSequence,
+            false,
+            finalPath,
+            sizeof(finalPath)))
+    {
+        return false;
+    }
+
+    LittleFS.remove(temporaryPath);
+
+    if (LittleFS.exists(finalPath))
+    {
+        return false;
+    }
+
+    File file = LittleFS.open(temporaryPath, FILE_WRITE);
+
+    if (!file)
+    {
+        return false;
+    }
+
+    const size_t bytesWritten = file.write(
+        (const uint8_t *)&record,
+        sizeof(PersistentTelemetryRecord));
+    file.flush();
+    file.close();
+
+    if (bytesWritten != sizeof(PersistentTelemetryRecord))
+    {
+        LittleFS.remove(temporaryPath);
+        return false;
+    }
+
+    if (!LittleFS.rename(temporaryPath, finalPath))
+    {
+        LittleFS.remove(temporaryPath);
+        return false;
+    }
+
+    PersistentTelemetryRecord verificationRecord = {};
+
+    if (!ReadPersistentRecordFile(finalPath, verificationRecord) ||
+        (strncmp(verificationRecord.recordId,
+            record.recordId,
+            FILE_OUTBOX_RECORD_ID_LENGTH) != 0))
+    {
+        Serial.println("LittleFS outbox verify-after-commit failed");
+        return false;
+    }
+
+    return true;
+}
+
+/**
+ * @brief  Scans the LittleFS outbox and restores FIFO boundaries after reboot.
+ * @retval true when every committed record is valid, otherwise false.
+ */
+static bool ScanPersistentOutbox(void)
+{
+    File directory = LittleFS.open(FILE_OUTBOX_DIRECTORY);
+
+    if (!directory || !directory.isDirectory())
+    {
+        return false;
+    }
+
+    uint32_t count = 0U;
+    uint64_t oldest = UINT64_MAX;
+    uint64_t newest = 0ULL;
+    File file = directory.openNextFile();
+
+    while (file)
+    {
+        char entryPath[96];
+        snprintf(entryPath, sizeof(entryPath), "%s", file.path());
+        const bool isDirectory = file.isDirectory();
+        const size_t fileSize = file.size();
+        file.close();
+
+        const size_t pathLength = strlen(entryPath);
+
+        if (!isDirectory &&
+            (pathLength >= 4U) &&
+            (strcmp(entryPath + pathLength - 4U, ".tmp") == 0))
+        {
+            LittleFS.remove(entryPath);
+        }
+        else if (!isDirectory &&
+            (pathLength >= 4U) &&
+            (strcmp(entryPath + pathLength - 4U, ".rec") == 0))
+        {
+            if (fileSize != sizeof(PersistentTelemetryRecord))
+            {
+                Serial.printf("Invalid outbox file size: %s\n", entryPath);
+                directory.close();
+                return false;
+            }
+
+            PersistentTelemetryRecord record = {};
+
+            if (!ReadPersistentRecordFile(entryPath, record))
+            {
+                Serial.printf("Corrupt outbox record: %s\n", entryPath);
+                directory.close();
+                return false;
+            }
+
+            count++;
+
+            if (record.queueSequence < oldest)
+            {
+                oldest = record.queueSequence;
+            }
+
+            if (record.queueSequence > newest)
+            {
+                newest = record.queueSequence;
+            }
+        }
+
+        file = directory.openNextFile();
+    }
+
+    directory.close();
+
+    s_outboxCount = count;
+    s_oldestQueueSequence = (count > 0U) ? oldest : 0ULL;
+    s_newestQueueSequence = (count > 0U) ? newest : 0ULL;
+    s_nextQueueSequence = (count > 0U) ? (newest + 1ULL) : 1ULL;
+
+    return true;
+}
+
+/**
+ * @brief  Checks whether a record ID already exists in the LittleFS outbox.
+ * @note   Used only by one-time NVS migration, so directory scanning is acceptable.
+ * @param  recordId: Globally unique record ID.
+ * @retval true when the record already exists, otherwise false.
+ */
+static bool PersistentOutboxContainsRecordId(const char *recordId)
+{
+    File directory = LittleFS.open(FILE_OUTBOX_DIRECTORY);
+
+    if (!directory || !directory.isDirectory())
+    {
+        return false;
+    }
+
+    bool found = false;
+    File file = directory.openNextFile();
+
+    while (file)
+    {
+        char entryPath[96];
+        snprintf(entryPath, sizeof(entryPath), "%s", file.path());
+        const bool isDirectory = file.isDirectory();
+        file.close();
+
+        const size_t pathLength = strlen(entryPath);
+
+        if (!isDirectory &&
+            (pathLength >= 4U) &&
+            (strcmp(entryPath + pathLength - 4U, ".rec") == 0))
+        {
+            PersistentTelemetryRecord record = {};
+
+            if (ReadPersistentRecordFile(entryPath, record) &&
+                (strncmp(record.recordId,
+                    recordId,
+                    FILE_OUTBOX_RECORD_ID_LENGTH) == 0))
+            {
+                found = true;
+                break;
+            }
+        }
+
+        file = directory.openNextFile();
+    }
+
+    directory.close();
+    return found;
+}
+
+/**
+ * @brief  Generates the globally unique string ID used end-to-end.
+ * @param  queueSequence: Local FIFO sequence number.
+ * @param  recordId: Output ID buffer.
+ * @param  recordIdSize: Size of recordId.
+ * @retval true when the ID fits the supplied buffer.
+ */
+static bool GenerateRecordId(uint64_t queueSequence,
+    char *recordId,
+    size_t recordIdSize)
+{
+    const int written = snprintf(recordId,
+        recordIdSize,
+        "gw-%s-%016llx-%016llx",
+        s_gatewayDeviceId,
+        (unsigned long long)s_bootNonce,
+        (unsigned long long)queueSequence);
+
+    return (written > 0) && ((size_t)written < recordIdSize);
+}
+
+/**
+ * @brief  Generates a deterministic ID for a record migrated from the legacy NVS outbox.
+ * @param  legacyRecordId: Previous numeric record ID.
+ * @param  recordId: Output ID buffer.
+ * @param  recordIdSize: Size of recordId.
+ * @retval true when the ID fits the supplied buffer.
+ */
+static bool GenerateLegacyMigrationRecordId(uint64_t legacyRecordId,
+    char *recordId,
+    size_t recordIdSize)
+{
+    const int written = snprintf(recordId,
+        recordIdSize,
+        "gw-%s-legacy-%016llx",
+        s_gatewayDeviceId,
+        (unsigned long long)legacyRecordId);
+
+    return (written > 0) && ((size_t)written < recordIdSize);
+}
+
+/**
+ * @brief  Adds one record to LittleFS before the STM32 receives an ACK.
+ * @param  message: Telemetry message to persist.
+ * @param  forcedRecordId: Optional deterministic ID used during migration.
+ * @retval true only when the final file has been committed and verified.
+ */
+static bool PersistentOutboxPushInternal(const TelemetryMessage &message,
+    const char *forcedRecordId)
 {
     if (xSemaphoreTake(g_outboxMutex, portMAX_DELAY) != pdTRUE)
     {
         return false;
     }
 
-    if (s_outboxCount >= PERSISTENT_OUTBOX_CAPACITY)
+    const size_t totalBytes = LittleFS.totalBytes();
+    const size_t usedBytes = LittleFS.usedBytes();
+    const size_t freeBytes = totalBytes > usedBytes ? totalBytes - usedBytes : 0U;
+
+    if ((s_outboxCount >= FILE_OUTBOX_MAX_RECORDS) ||
+        (freeBytes < (FILE_OUTBOX_MIN_FREE_BYTES + sizeof(PersistentTelemetryRecord))))
     {
         xSemaphoreGive(g_outboxMutex);
-        Serial.println("Persistent outbox full");
-        return false;
-    }
-
-    uint16_t freeSlot = PERSISTENT_OUTBOX_CAPACITY;
-
-    for (uint16_t slotIndex = 0U;
-         slotIndex < PERSISTENT_OUTBOX_CAPACITY;
-         slotIndex++)
-    {
-        if (!s_outboxSlotUsed[slotIndex])
-        {
-            freeSlot = slotIndex;
-            break;
-        }
-    }
-
-    if (freeSlot >= PERSISTENT_OUTBOX_CAPACITY)
-    {
-        xSemaphoreGive(g_outboxMutex);
+        Serial.printf("LittleFS outbox full: count=%u free=%u\n",
+            (unsigned int)s_outboxCount,
+            (unsigned int)freeBytes);
         return false;
     }
 
     PersistentTelemetryRecord record = {};
-    record.magic = PERSISTENT_RECORD_MAGIC;
-    record.version = PERSISTENT_RECORD_VERSION;
-    record.recordId = ((uint64_t)s_currentBootId << 32U) |
-        (uint64_t)s_nextRecordCounter++;
+    record.magic = FILE_OUTBOX_RECORD_MAGIC;
+    record.version = FILE_OUTBOX_RECORD_VERSION;
+    record.recordSize = sizeof(PersistentTelemetryRecord);
+    record.queueSequence = s_nextQueueSequence;
     record.message = message;
 
-    char slotKey[8];
-    BuildOutboxSlotKey(freeSlot, slotKey, sizeof(slotKey));
+    bool idReady = false;
 
-    esp_err_t result = nvs_set_blob(s_outboxNvsHandle,
-        slotKey,
-        &record,
-        sizeof(record));
-
-    if (result == ESP_OK)
+    if (forcedRecordId != nullptr)
     {
-        result = nvs_commit(s_outboxNvsHandle);
+        const int written = snprintf(record.recordId,
+            sizeof(record.recordId),
+            "%s",
+            forcedRecordId);
+        idReady = (written >= 0) && ((size_t)written < sizeof(record.recordId));
+    }
+    else
+    {
+        idReady = GenerateRecordId(record.queueSequence,
+            record.recordId,
+            sizeof(record.recordId));
     }
 
-    if (result != ESP_OK)
+    if (!idReady)
     {
-        Serial.printf("Outbox persist failed: %d\n", (int)result);
         xSemaphoreGive(g_outboxMutex);
         return false;
     }
 
-    s_outboxSlotUsed[freeSlot] = true;
-    s_outboxSlotRecordId[freeSlot] = record.recordId;
+    record.checksum = CalculateCrc32(
+        (const uint8_t *)&record,
+        offsetof(PersistentTelemetryRecord, checksum));
+
+    if (!WritePersistentRecordFile(record))
+    {
+        xSemaphoreGive(g_outboxMutex);
+        Serial.println("LittleFS outbox commit failed");
+        return false;
+    }
+
+    if (s_outboxCount == 0U)
+    {
+        s_oldestQueueSequence = record.queueSequence;
+    }
+
+    s_newestQueueSequence = record.queueSequence;
+    s_nextQueueSequence = record.queueSequence + 1ULL;
     s_outboxCount++;
 
-    LOGI("[OUTBOX+] id=%llu slot=%u count=%u\n",
-        (unsigned long long)record.recordId,
-        (unsigned int)freeSlot,
-        (unsigned int)s_outboxCount);
+    LOGI("[OUTBOX+] id=%s q=%llu count=%u free=%u\n",
+        record.recordId,
+        (unsigned long long)record.queueSequence,
+        (unsigned int)s_outboxCount,
+        (unsigned int)(LittleFS.totalBytes() - LittleFS.usedBytes()));
 
     xSemaphoreGive(g_outboxMutex);
     return true;
+}
+
+/**
+ * @brief  Persists one normal telemetry record before acknowledging the node.
+ * @param  message: Telemetry message to store.
+ * @retval true after durable LittleFS commit, otherwise false.
+ */
+static bool PersistentOutboxPush(const TelemetryMessage &message)
+{
+    return PersistentOutboxPushInternal(message, nullptr);
 }
 
 /**
@@ -531,33 +876,23 @@ static bool PersistentOutboxPeek(PersistentTelemetryRecord &record)
         return false;
     }
 
-    if (s_outboxCount == 0U)
+    if ((s_outboxCount == 0U) || (s_oldestQueueSequence == 0ULL))
     {
         xSemaphoreGive(g_outboxMutex);
         return false;
     }
 
-    uint16_t oldestSlot = PERSISTENT_OUTBOX_CAPACITY;
-    uint64_t oldestRecordId = UINT64_MAX;
-
-    for (uint16_t slotIndex = 0U;
-         slotIndex < PERSISTENT_OUTBOX_CAPACITY;
-         slotIndex++)
-    {
-        if (s_outboxSlotUsed[slotIndex] &&
-            (s_outboxSlotRecordId[slotIndex] < oldestRecordId))
-        {
-            oldestRecordId = s_outboxSlotRecordId[slotIndex];
-            oldestSlot = slotIndex;
-        }
-    }
-
-    const bool success = (oldestSlot < PERSISTENT_OUTBOX_CAPACITY) &&
-        ReadPersistentRecord(oldestSlot, record);
+    char path[64];
+    const bool pathReady = BuildOutboxRecordPath(
+        s_oldestQueueSequence,
+        false,
+        path,
+        sizeof(path));
+    const bool success = pathReady && ReadPersistentRecordFile(path, record);
 
     if (!success)
     {
-        Serial.println("Persistent outbox head read failed");
+        Serial.println("LittleFS outbox head read failed");
     }
 
     xSemaphoreGive(g_outboxMutex);
@@ -565,70 +900,360 @@ static bool PersistentOutboxPeek(PersistentTelemetryRecord &record)
 }
 
 /**
- * @brief  Removes the oldest durable telemetry record after MQTT broker PUBACK.
- * @param  expectedRecordId: Record ID that was acknowledged by the broker.
- * @retval true when the record was durably removed, otherwise false.
+ * @brief  Removes the oldest record only after broker PUBACK.
+ * @param  expectedRecordId: String ID of the acknowledged record.
+ * @retval true when the committed file has been removed, otherwise false.
  */
-static bool PersistentOutboxPop(uint64_t expectedRecordId)
+static bool PersistentOutboxPop(const char *expectedRecordId)
 {
-    if (xSemaphoreTake(g_outboxMutex, portMAX_DELAY) != pdTRUE)
+    if ((expectedRecordId == nullptr) ||
+        (xSemaphoreTake(g_outboxMutex, portMAX_DELAY) != pdTRUE))
     {
         return false;
     }
 
-    uint16_t targetSlot = PERSISTENT_OUTBOX_CAPACITY;
-
-    for (uint16_t slotIndex = 0U;
-         slotIndex < PERSISTENT_OUTBOX_CAPACITY;
-         slotIndex++)
-    {
-        if (s_outboxSlotUsed[slotIndex] &&
-            (s_outboxSlotRecordId[slotIndex] == expectedRecordId))
-        {
-            targetSlot = slotIndex;
-            break;
-        }
-    }
-
-    if (targetSlot >= PERSISTENT_OUTBOX_CAPACITY)
+    if ((s_outboxCount == 0U) || (s_oldestQueueSequence == 0ULL))
     {
         xSemaphoreGive(g_outboxMutex);
         return false;
     }
 
-    char slotKey[8];
-    BuildOutboxSlotKey(targetSlot, slotKey, sizeof(slotKey));
+    char path[64];
+    PersistentTelemetryRecord record = {};
 
-    esp_err_t result = nvs_erase_key(s_outboxNvsHandle, slotKey);
-
-    if (result == ESP_OK)
+    if (!BuildOutboxRecordPath(s_oldestQueueSequence,
+            false,
+            path,
+            sizeof(path)) ||
+        !ReadPersistentRecordFile(path, record) ||
+        (strncmp(record.recordId,
+            expectedRecordId,
+            FILE_OUTBOX_RECORD_ID_LENGTH) != 0))
     {
-        result = nvs_commit(s_outboxNvsHandle);
-    }
-
-    if (result != ESP_OK)
-    {
-        Serial.printf("Outbox remove failed: %d\n", (int)result);
         xSemaphoreGive(g_outboxMutex);
         return false;
     }
 
-    s_outboxSlotUsed[targetSlot] = false;
-    s_outboxSlotRecordId[targetSlot] = 0ULL;
+    if (!LittleFS.remove(path))
+    {
+        Serial.println("LittleFS outbox remove failed");
+        xSemaphoreGive(g_outboxMutex);
+        return false;
+    }
+
+    const uint64_t removedSequence = s_oldestQueueSequence;
 
     if (s_outboxCount > 0U)
     {
         s_outboxCount--;
     }
 
-    LOGI("[OUTBOX-] id=%llu slot=%u count=%u\n",
-        (unsigned long long)expectedRecordId,
-        (unsigned int)targetSlot,
+    if (s_outboxCount == 0U)
+    {
+        s_oldestQueueSequence = 0ULL;
+        s_newestQueueSequence = 0ULL;
+    }
+    else
+    {
+        uint64_t nextSequence = removedSequence + 1ULL;
+        bool nextFound = false;
+
+        while (nextSequence <= s_newestQueueSequence)
+        {
+            char nextPath[64];
+
+            if (BuildOutboxRecordPath(nextSequence,
+                    false,
+                    nextPath,
+                    sizeof(nextPath)) &&
+                LittleFS.exists(nextPath))
+            {
+                s_oldestQueueSequence = nextSequence;
+                nextFound = true;
+                break;
+            }
+
+            nextSequence++;
+        }
+
+        if (!nextFound)
+        {
+            Serial.println("LittleFS outbox FIFO index inconsistent");
+            xSemaphoreGive(g_outboxMutex);
+            return false;
+        }
+    }
+
+    LOGI("[OUTBOX-] id=%s q=%llu count=%u\n",
+        expectedRecordId,
+        (unsigned long long)removedSequence,
         (unsigned int)s_outboxCount);
 
     xSemaphoreGive(g_outboxMutex);
     return true;
 }
+
+/**
+ * @brief  Reads one v1/v2 record from the former NVS outbox for one-time migration.
+ * @param  nvsHandle: Open legacy namespace handle.
+ * @param  slotIndex: Legacy slot index.
+ * @param  migrationRecord: Normalized migration result.
+ * @retval true when a valid supported record was read, otherwise false.
+ */
+static bool ReadLegacyNvsMigrationRecord(nvs_handle_t nvsHandle,
+    uint16_t slotIndex,
+    LegacyMigrationRecord &migrationRecord)
+{
+    char slotKey[8];
+    size_t storedSize = 0U;
+
+    if (!BuildLegacyNvsSlotKey(slotIndex, slotKey, sizeof(slotKey)))
+    {
+        return false;
+    }
+
+    esp_err_t result = nvs_get_blob(nvsHandle, slotKey, nullptr, &storedSize);
+
+    if (result == ESP_ERR_NVS_NOT_FOUND)
+    {
+        migrationRecord = {};
+        return true;
+    }
+
+    if (result != ESP_OK)
+    {
+        return false;
+    }
+
+    migrationRecord = {};
+    migrationRecord.used = true;
+    migrationRecord.slotIndex = slotIndex;
+
+    if (storedSize == sizeof(LegacyPersistentTelemetryRecordV2))
+    {
+        LegacyPersistentTelemetryRecordV2 legacy = {};
+        size_t readSize = sizeof(legacy);
+        result = nvs_get_blob(nvsHandle, slotKey, &legacy, &readSize);
+
+        if ((result != ESP_OK) ||
+            (readSize != sizeof(legacy)) ||
+            (legacy.magic != LEGACY_PERSISTENT_RECORD_MAGIC) ||
+            (legacy.version != LEGACY_PERSISTENT_RECORD_VERSION_V2))
+        {
+            return false;
+        }
+
+        migrationRecord.legacyRecordId = legacy.recordId;
+        migrationRecord.message.address = legacy.message.address;
+        migrationRecord.message.sequence = legacy.message.sequence;
+        migrationRecord.message.temperatureCentiCelsius =
+            legacy.message.temperatureCentiCelsius;
+        migrationRecord.message.status = legacy.message.status;
+        memcpy(migrationRecord.message.sensorFaults,
+            legacy.message.sensorFaults,
+            SENSOR_COUNT);
+        migrationRecord.message.faultDetailValid = legacy.message.faultDetailValid;
+        migrationRecord.message.sampledAtUnixMs = legacy.message.sampledAtUnixMs;
+        migrationRecord.message.captureBootNonce = 0ULL;
+        migrationRecord.message.nodeSampleAgeValid = 0U;
+        return true;
+    }
+
+    if (storedSize == sizeof(LegacyPersistentTelemetryRecordV1))
+    {
+        LegacyPersistentTelemetryRecordV1 legacy = {};
+        size_t readSize = sizeof(legacy);
+        result = nvs_get_blob(nvsHandle, slotKey, &legacy, &readSize);
+
+        if ((result != ESP_OK) ||
+            (readSize != sizeof(legacy)) ||
+            (legacy.magic != LEGACY_PERSISTENT_RECORD_MAGIC) ||
+            (legacy.version != LEGACY_PERSISTENT_RECORD_VERSION_V1))
+        {
+            return false;
+        }
+
+        migrationRecord.legacyRecordId = legacy.recordId;
+        migrationRecord.message.address = legacy.message.address;
+        migrationRecord.message.sequence = legacy.message.sequence;
+        migrationRecord.message.temperatureCentiCelsius =
+            legacy.message.temperatureCentiCelsius;
+        migrationRecord.message.status = legacy.message.status;
+        migrationRecord.message.faultDetailValid = 0U;
+        migrationRecord.message.sampledAtUnixMs = legacy.message.sampledAtUnixMs;
+        migrationRecord.message.captureBootNonce = 0ULL;
+        migrationRecord.message.nodeSampleAgeValid = 0U;
+        return true;
+    }
+
+    return false;
+}
+
+/**
+ * @brief  Migrates queued v5 NVS records into LittleFS without duplicate IDs.
+ * @note   NVS is used only for this one-time migration and not for new telemetry.
+ * @retval true when no legacy data remains un-migrated, otherwise false.
+ */
+static bool MigrateLegacyNvsOutbox(void)
+{
+    esp_err_t result = nvs_flash_init();
+
+    if ((result != ESP_OK) &&
+        (result != ESP_ERR_NVS_NO_FREE_PAGES) &&
+        (result != ESP_ERR_NVS_NEW_VERSION_FOUND))
+    {
+        Serial.printf("Legacy NVS init failed: %d\n", (int)result);
+        return false;
+    }
+
+    if ((result == ESP_ERR_NVS_NO_FREE_PAGES) ||
+        (result == ESP_ERR_NVS_NEW_VERSION_FOUND))
+    {
+        Serial.println("Legacy NVS requires erase; refusing because queued records may exist");
+        return false;
+    }
+
+    nvs_handle_t nvsHandle = 0;
+    result = nvs_open(LEGACY_NVS_OUTBOX_NAMESPACE, NVS_READWRITE, &nvsHandle);
+
+    if (result == ESP_ERR_NVS_NOT_FOUND)
+    {
+        return true;
+    }
+
+    if (result != ESP_OK)
+    {
+        Serial.printf("Legacy outbox namespace open failed: %d\n", (int)result);
+        return false;
+    }
+
+    LegacyMigrationRecord records[LEGACY_NVS_OUTBOX_CAPACITY] = {};
+    uint16_t recordCount = 0U;
+
+    for (uint16_t slotIndex = 0U;
+         slotIndex < LEGACY_NVS_OUTBOX_CAPACITY;
+         slotIndex++)
+    {
+        LegacyMigrationRecord record = {};
+
+        if (!ReadLegacyNvsMigrationRecord(nvsHandle, slotIndex, record))
+        {
+            Serial.printf("Legacy NVS slot %u is unreadable; migration stopped\n",
+                (unsigned int)slotIndex);
+            nvs_close(nvsHandle);
+            return false;
+        }
+
+        if (record.used)
+        {
+            records[recordCount++] = record;
+        }
+    }
+
+    for (uint16_t left = 0U; left < recordCount; left++)
+    {
+        for (uint16_t right = (uint16_t)(left + 1U); right < recordCount; right++)
+        {
+            if (records[right].legacyRecordId < records[left].legacyRecordId)
+            {
+                const LegacyMigrationRecord temporary = records[left];
+                records[left] = records[right];
+                records[right] = temporary;
+            }
+        }
+    }
+
+    for (uint16_t recordIndex = 0U; recordIndex < recordCount; recordIndex++)
+    {
+        LegacyMigrationRecord &legacy = records[recordIndex];
+        char migratedRecordId[FILE_OUTBOX_RECORD_ID_LENGTH];
+
+        if (!GenerateLegacyMigrationRecordId(legacy.legacyRecordId,
+                migratedRecordId,
+                sizeof(migratedRecordId)))
+        {
+            nvs_close(nvsHandle);
+            return false;
+        }
+
+        if (!PersistentOutboxContainsRecordId(migratedRecordId) &&
+            !PersistentOutboxPushInternal(legacy.message, migratedRecordId))
+        {
+            Serial.println("Legacy NVS -> LittleFS migration failed");
+            nvs_close(nvsHandle);
+            return false;
+        }
+
+        char slotKey[8];
+        BuildLegacyNvsSlotKey(legacy.slotIndex, slotKey, sizeof(slotKey));
+        result = nvs_erase_key(nvsHandle, slotKey);
+
+        if (result == ESP_OK)
+        {
+            result = nvs_commit(nvsHandle);
+        }
+
+        if (result != ESP_OK)
+        {
+            Serial.printf("Unable to clear migrated legacy slot %u: %d\n",
+                (unsigned int)legacy.slotIndex,
+                (int)result);
+            nvs_close(nvsHandle);
+            return false;
+        }
+    }
+
+    if (recordCount > 0U)
+    {
+        nvs_erase_key(nvsHandle, LEGACY_NVS_OUTBOX_BOOT_KEY);
+        nvs_commit(nvsHandle);
+        Serial.printf("Migrated %u legacy NVS telemetry records to LittleFS\n",
+            (unsigned int)recordCount);
+    }
+
+    nvs_close(nvsHandle);
+    return true;
+}
+
+/**
+ * @brief  Initializes the LittleFS durable outbox and migrates legacy NVS records.
+ * @retval true when the outbox is safe to use, otherwise false.
+ */
+static bool InitializePersistentOutbox(void)
+{
+    if (!InitializeGatewayIdentity() || !MountTelemetryFilesystem())
+    {
+        return false;
+    }
+
+    g_outboxMutex = xSemaphoreCreateMutex();
+
+    if (g_outboxMutex == nullptr)
+    {
+        return false;
+    }
+
+    if (!ScanPersistentOutbox())
+    {
+        return false;
+    }
+
+    if (!MigrateLegacyNvsOutbox())
+    {
+        return false;
+    }
+
+    Serial.printf(
+        "LittleFS outbox ready: restored=%u max=%u used=%u/%u bytes device=%s\n",
+        (unsigned int)s_outboxCount,
+        (unsigned int)FILE_OUTBOX_MAX_RECORDS,
+        (unsigned int)LittleFS.usedBytes(),
+        (unsigned int)LittleFS.totalBytes(),
+        s_gatewayDeviceId);
+
+    return true;
+}
+
 
 /**
  * @brief  Returns the MQTT node name associated with a LoRa node address.
@@ -967,26 +1592,52 @@ static bool ValidateFaultDetailConsistency(uint8_t status,
 }
 
 /**
- * @brief  Ensures the ESP32 is connected to Wi-Fi.
- * @retval None
+ * @brief  Advances Wi-Fi connection state without blocking the LoRa task.
+ * @note   Connection attempts are rate-limited; this function always returns quickly.
+ * @retval true when Wi-Fi is connected, otherwise false.
  */
-static void EnsureWiFiConnected(void)
+static bool MaintainWiFiConnection(void)
 {
-    if (WiFi.status() == WL_CONNECTED)
+    const bool connected = WiFi.status() == WL_CONNECTED;
+
+    if (connected)
     {
-        return;
+        if (!s_wifiWasConnected)
+        {
+            s_wifiWasConnected = true;
+            Serial.print("WiFi connected. IP: ");
+            Serial.println(WiFi.localIP());
+        }
+
+        ConfigureSystemTimeIfNeeded();
+        MonitorSystemTime();
+        return true;
     }
 
-    Serial.println("WiFi disconnected, reconnecting...");
-    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-
-    while (WiFi.status() != WL_CONNECTED)
+    if (s_wifiWasConnected)
     {
-        vTaskDelay(pdMS_TO_TICKS(500));
+        s_wifiWasConnected = false;
+        s_mqttConnected = false;
+        Serial.println("WiFi disconnected; LoRa acquisition continues offline");
     }
 
-    Serial.print("WiFi connected. IP: ");
-    Serial.println(WiFi.localIP());
+    const unsigned long nowMs = millis();
+
+    if ((s_lastWiFiAttemptMs == 0UL) ||
+        ((nowMs - s_lastWiFiAttemptMs) >= WIFI_RECONNECT_INTERVAL_MS))
+    {
+        s_lastWiFiAttemptMs = nowMs;
+        Serial.println("WiFi reconnect attempt...");
+
+        if (WiFi.getMode() != WIFI_STA)
+        {
+            WiFi.mode(WIFI_STA);
+        }
+
+        WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    }
+
+    return false;
 }
 
 /**
@@ -1089,12 +1740,16 @@ static bool InitializeMqttClient(void)
         nullptr) != ESP_OK)
     {
         Serial.println("MQTT event registration failed");
+        esp_mqtt_client_destroy(g_mqttClient);
+        g_mqttClient = nullptr;
         return false;
     }
 
     if (esp_mqtt_client_start(g_mqttClient) != ESP_OK)
     {
         Serial.println("MQTT client start failed");
+        esp_mqtt_client_destroy(g_mqttClient);
+        g_mqttClient = nullptr;
         return false;
     }
 
@@ -1103,7 +1758,7 @@ static bool InitializeMqttClient(void)
 
 /**
  * @brief  Enqueues one durable telemetry record for MQTT QoS 1 delivery.
- * @note   Detailed faults are sent as six raw fault-code bytes when available.
+ * @note   Record IDs are JSON strings so JavaScript never loses uint64 precision.
  * @param  record: Durable outbox record to publish.
  * @retval Positive MQTT message ID on success, or -1 on failure.
  */
@@ -1118,48 +1773,74 @@ static int EnqueueTelemetryQos1(const PersistentTelemetryRecord &record)
     }
 
     char telemetryTopic[40];
-    char telemetryPayload[448];
+    char telemetryPayload[512];
     char timestampText[32];
     char ageText[24];
     char faultArrayText[64];
-
-    const bool recovered = message.bootId != s_currentBootId;
+    const bool recovered = message.captureBootNonce != s_bootNonce;
     const uint64_t currentUnixMs = GetUnixTimeMs();
+    uint64_t effectiveSampledAtUnixMs = message.sampledAtUnixMs;
+    uint64_t effectiveAgeMs = 0ULL;
+    bool ageValid = false;
     bool timestampValid = false;
 
-    if (message.sampledAtUnixMs != 0ULL)
+    if (effectiveSampledAtUnixMs != 0ULL)
     {
-        snprintf(timestampText,
-            sizeof(timestampText),
-            "%llu",
-            (unsigned long long)message.sampledAtUnixMs);
         timestampValid = true;
 
-        if ((currentUnixMs >= message.sampledAtUnixMs) &&
-            ((currentUnixMs - message.sampledAtUnixMs) <= 0xFFFFFFFFULL))
+        if (currentUnixMs >= effectiveSampledAtUnixMs)
         {
-            snprintf(ageText,
-                sizeof(ageText),
-                "%lu",
-                (unsigned long)(currentUnixMs - message.sampledAtUnixMs));
-        }
-        else
-        {
-            snprintf(ageText, sizeof(ageText), "null");
+            effectiveAgeMs = currentUnixMs - effectiveSampledAtUnixMs;
+            ageValid = effectiveAgeMs <= 0xFFFFFFFFULL;
         }
     }
     else if (!recovered)
     {
-        snprintf(timestampText, sizeof(timestampText), "null");
-        snprintf(ageText,
-            sizeof(ageText),
-            "%lu",
-            (unsigned long)((uint32_t)(millis() - message.capturedAtMs)));
-        timestampValid = true;
+        effectiveAgeMs = (uint64_t)((uint32_t)(millis() - message.capturedAtMs));
+
+        if (message.nodeSampleAgeValid != 0U)
+        {
+            effectiveAgeMs += (uint64_t)message.nodeSampleAgeMs +
+                (uint64_t)TIMESTAMPED_DATA_AIRTIME_MS;
+        }
+
+        ageValid = effectiveAgeMs <= 0xFFFFFFFFULL;
+
+        if (ageValid &&
+            (currentUnixMs != 0ULL) &&
+            (currentUnixMs >= effectiveAgeMs))
+        {
+            effectiveSampledAtUnixMs = currentUnixMs - effectiveAgeMs;
+            timestampValid = true;
+        }
+        else if (ageValid)
+        {
+            /* Backend wall clock can still reconstruct sampledAt from ageMs. */
+            timestampValid = true;
+        }
+    }
+
+    if (effectiveSampledAtUnixMs != 0ULL)
+    {
+        snprintf(timestampText,
+            sizeof(timestampText),
+            "%llu",
+            (unsigned long long)effectiveSampledAtUnixMs);
     }
     else
     {
         snprintf(timestampText, sizeof(timestampText), "null");
+    }
+
+    if (ageValid)
+    {
+        snprintf(ageText,
+            sizeof(ageText),
+            "%lu",
+            (unsigned long)effectiveAgeMs);
+    }
+    else
+    {
         snprintf(ageText, sizeof(ageText), "null");
     }
 
@@ -1211,11 +1892,11 @@ static int EnqueueTelemetryQos1(const PersistentTelemetryRecord &record)
 
     snprintf(telemetryPayload,
         sizeof(telemetryPayload),
-        "{\"id\":%llu,\"seq\":%u,\"temp\":%s,\"tempValid\":%s,"
+        "{\"id\":\"%s\",\"seq\":%u,\"temp\":%s,\"tempValid\":%s,"
         "\"status\":%u,\"faultDetailValid\":%s,\"faults\":%s,"
         "\"sampledAtMs\":%s,\"ageMs\":%s,"
         "\"timestampValid\":%s,\"recovered\":%s}",
-        (unsigned long long)record.recordId,
+        record.recordId,
         message.sequence,
         temperatureText,
         message.temperatureCentiCelsius == TEMPERATURE_INVALID_CENTI_C
@@ -1239,9 +1920,9 @@ static int EnqueueTelemetryQos1(const PersistentTelemetryRecord &record)
 
     if (mqttMessageId >= 0)
     {
-        LOGI("[MQTT-QOS1-TX] %s id=%llu seq=%u msg_id=%d payload=%s\n",
+        LOGI("[MQTT-QOS1-TX] %s id=%s seq=%u msg_id=%d payload=%s\n",
             nodeName,
-            (unsigned long long)record.recordId,
+            record.recordId,
             message.sequence,
             mqttMessageId,
             telemetryPayload);
@@ -1261,7 +1942,7 @@ static int EnqueueTelemetryQos1(const PersistentTelemetryRecord &record)
  * @param  capturedAtMs: Gateway uptime timestamp when the DATA frame was accepted.
  * @param  nodeSampleAgeMs: Age reported by STM32 from ADC-burst midpoint to TX.
  * @param  nodeSampleAgeValid: true when the DATA payload contains sample age.
- * @retval true when the record is durably committed to NVS, otherwise false.
+ * @retval true when the record is durably committed to LittleFS, otherwise false.
  */
 static bool PersistTelemetry(uint8_t address,
     uint8_t sequence,
@@ -1279,6 +1960,10 @@ static bool PersistTelemetry(uint8_t address,
     message.temperatureCentiCelsius = temperatureCentiCelsius;
     message.status = status;
     message.faultDetailValid = faultDetailValid ? 1U : 0U;
+    message.nodeSampleAgeValid = nodeSampleAgeValid ? 1U : 0U;
+    message.nodeSampleAgeMs = nodeSampleAgeMs;
+    message.capturedAtMs = capturedAtMs;
+    message.captureBootNonce = s_bootNonce;
 
     if (faultDetailValid)
     {
@@ -1289,9 +1974,6 @@ static bool PersistTelemetry(uint8_t address,
             message.sensorFaults[sensorIndex] = sensorFaults[sensorIndex];
         }
     }
-
-    message.capturedAtMs = capturedAtMs;
-    message.bootId = s_currentBootId;
 
     const uint64_t receivedAtUnixMs = GetUnixTimeMs();
 
@@ -1305,10 +1987,15 @@ static bool PersistTelemetry(uint8_t address,
             (uint64_t)nodeSampleAgeMs -
             (uint64_t)TIMESTAMPED_DATA_AIRTIME_MS;
     }
+    else if (!nodeSampleAgeValid)
+    {
+        /* Legacy payloads can only be timestamped at gateway reception. */
+        message.sampledAtUnixMs = receivedAtUnixMs;
+    }
     else
     {
-        /* Rolling-update fallback for legacy 3-byte / 9-byte node payloads. */
-        message.sampledAtUnixMs = receivedAtUnixMs;
+        /* Keep nodeSampleAgeMs in flash; reconstruct when NTP becomes valid. */
+        message.sampledAtUnixMs = 0ULL;
     }
 
     return PersistentOutboxPush(message);
@@ -1350,9 +2037,9 @@ static void AcknowledgeDuplicateRetries(uint8_t address, uint8_t sequence)
 }
 
 /**
- * @brief  Maintains Wi-Fi and delivers queued telemetry with MQTT QoS 1.
- * @note   A telemetry item is removed only after broker PUBACK is received.
- * @note   ESP-MQTT handles retransmission of an unacknowledged QoS 1 message after reconnect.
+ * @brief  Maintains Wi-Fi and delivers LittleFS records with MQTT QoS 1.
+ * @note   Wi-Fi/MQTT failures never block the independent LoRa acquisition task.
+ * @note   A telemetry record is removed only after broker PUBACK is received.
  * @param  parameter: FreeRTOS task parameter, unused.
  * @retval Never returns.
  */
@@ -1370,7 +2057,21 @@ static void MqttTask(void *parameter)
 
     for (;;)
     {
-        EnsureWiFiConnected();
+        const bool wifiConnected = MaintainWiFiConnection();
+
+        if (wifiConnected && !s_mqttInitialized)
+        {
+            if (InitializeMqttClient())
+            {
+                s_mqttInitialized = true;
+            }
+            else
+            {
+                Serial.println("MQTT initialization failed; retrying without stopping LoRa");
+                vTaskDelay(pdMS_TO_TICKS(MQTT_ENQUEUE_RETRY_DELAY_MS));
+                continue;
+            }
+        }
 
         if (!hasPendingRecord)
         {
@@ -1384,6 +2085,8 @@ static void MqttTask(void *parameter)
 
         if (hasPendingRecord &&
             !waitingForPubAck &&
+            wifiConnected &&
+            s_mqttInitialized &&
             s_mqttConnected)
         {
             pendingMqttMessageId = EnqueueTelemetryQos1(pendingRecord);
@@ -1417,15 +2120,15 @@ static void MqttTask(void *parameter)
                 {
                     if (!PersistentOutboxPop(pendingRecord.recordId))
                     {
-                        Serial.println("PUBACK received but durable outbox removal failed");
+                        Serial.println("PUBACK received but LittleFS outbox removal failed");
                         vTaskDelay(pdMS_TO_TICKS(MQTT_ENQUEUE_RETRY_DELAY_MS));
                         continue;
                     }
 
                     pubAckCount++;
 
-                    LOGI("[MQTT-PUBACK] id=%llu seq=%u msg_id=%d count=%lu\n",
-                        (unsigned long long)pendingRecord.recordId,
+                    LOGI("[MQTT-PUBACK] id=%s seq=%u msg_id=%d count=%lu\n",
+                        pendingRecord.recordId,
                         pendingRecord.message.sequence,
                         pendingMqttMessageId,
                         (unsigned long)pubAckCount);
@@ -1443,6 +2146,7 @@ static void MqttTask(void *parameter)
 
             if (((millis() - mqttEnqueueTimeMs) >= MQTT_ACK_WATCHDOG_MS) &&
                 s_mqttConnected &&
+                (g_mqttClient != nullptr) &&
                 (esp_mqtt_client_get_outbox_size(g_mqttClient) == 0))
             {
                 Serial.printf("MQTT PUBACK watchdog expired for msg_id=%d; retrying durable record\n",
@@ -1455,7 +2159,7 @@ static void MqttTask(void *parameter)
             continue;
         }
 
-        vTaskDelay(pdMS_TO_TICKS(20));
+        vTaskDelay(pdMS_TO_TICKS(50));
     }
 }
 
@@ -1621,7 +2325,8 @@ static void LoraTask(void *parameter)
 }
 
 /**
- * @brief  Initializes LoRa, persistent telemetry outbox and FreeRTOS tasks.
+ * @brief  Initializes LoRa, LittleFS durable outbox and independent FreeRTOS tasks.
+ * @note   Wi-Fi is intentionally not awaited here; LoRa acquisition starts offline.
  * @retval None
  */
 void setup(void)
@@ -1648,11 +2353,6 @@ void setup(void)
     LoRa.setPreambleLength(8);
     LoRa.enableCrc();
 
-    WiFi.mode(WIFI_STA);
-    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-    EnsureWiFiConnected();
-    InitializeSystemTime();
-
     if (!InitializePersistentOutbox())
     {
         Serial.println("Persistent outbox initialization failed");
@@ -1663,23 +2363,8 @@ void setup(void)
         }
     }
 
-    xTaskCreatePinnedToCore(MqttTask,
-        "mqttTask",
-        6144,
-        nullptr,
-        1,
-        &g_mqttTaskHandle,
-        1);
-
-    if (!InitializeMqttClient())
-    {
-        Serial.println("MQTT initialization failed");
-
-        while (1)
-        {
-            delay(1000);
-        }
-    }
+    WiFi.mode(WIFI_STA);
+    WiFi.setAutoReconnect(true);
 
     xTaskCreatePinnedToCore(LoraTask,
         "loraTask",
@@ -1689,7 +2374,16 @@ void setup(void)
         nullptr,
         0);
 
-    Serial.println("Gateway ready (protocol v5: durable NVS outbox + MQTT QoS 1)");
+    xTaskCreatePinnedToCore(MqttTask,
+        "mqttTask",
+        7168,
+        nullptr,
+        1,
+        &g_mqttTaskHandle,
+        1);
+
+    Serial.println(
+        "Gateway ready (protocol v10: offline-first LittleFS + MQTT QoS1 + string IDs)");
 }
 
 /**

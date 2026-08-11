@@ -136,7 +136,26 @@ function parseTelemetryPayload(topic, payloadBuffer) {
     throw new Error(`Invalid JSON for ${topic}: ${error.message}`);
   }
 
-  const recordId = payload?.id;
+  const rawRecordId = payload?.id;
+  let recordId;
+  let legacyNumericRecordId = null;
+
+  if (typeof rawRecordId === 'string') {
+    const normalizedRecordId = rawRecordId.trim();
+
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{7,95}$/.test(normalizedRecordId)) {
+      throw new Error(`Invalid string id for ${topic}`);
+    }
+
+    recordId = normalizedRecordId;
+  } else if (Number.isSafeInteger(rawRecordId) && rawRecordId >= 0) {
+    /* Rolling-update support for pre-v10 gateway payloads. */
+    legacyNumericRecordId = rawRecordId;
+    recordId = String(rawRecordId);
+  } else {
+    throw new Error(`Invalid id for ${topic}`);
+  }
+
   const sequence = payload?.seq;
   const status = payload?.status;
   const temperatureValid = payload?.tempValid;
@@ -148,10 +167,6 @@ function parseTelemetryPayload(topic, payloadBuffer) {
   const sampleAgeMs = payload?.ageMs ?? null;
   const timestampValid = payload?.timestampValid ?? true;
   const recovered = payload?.recovered ?? false;
-
-  if (!Number.isSafeInteger(recordId) || recordId < 0) {
-    throw new Error(`Invalid id for ${topic}`);
-  }
 
   if (!Number.isInteger(sequence) || sequence < 0 || sequence > 255) {
     throw new Error(`Invalid seq for ${topic}`);
@@ -224,6 +239,7 @@ function parseTelemetryPayload(topic, payloadBuffer) {
 
   return {
     recordId,
+    legacyNumericRecordId,
     sequence,
     status,
     faultDetailValid,
@@ -238,8 +254,19 @@ function parseTelemetryPayload(topic, payloadBuffer) {
 }
 
 
-function getOutboxFileName(node, recordId) {
-  return `${node}-${String(recordId).padStart(16, '0')}.json`;
+function getOutboxFileName(node, recordId, legacyNumericRecordId = null) {
+  if (Number.isSafeInteger(legacyNumericRecordId) && legacyNumericRecordId >= 0) {
+    return `${node}-${String(legacyNumericRecordId).padStart(16, '0')}.json`;
+  }
+
+  const digest = crypto
+    .createHash('sha256')
+    .update(node)
+    .update('\0')
+    .update(String(recordId))
+    .digest('hex');
+
+  return `${node}-${digest}.json`;
 }
 
 async function fileExists(filePath) {
@@ -387,7 +414,11 @@ async function acceptTelemetryDurably(topic, payloadBuffer) {
 
   const receivedAt = new Date();
   const sampledAt = calculateSampledAt(receivedAt, telemetry);
-  const fileName = getOutboxFileName(node, telemetry.recordId);
+  const fileName = getOutboxFileName(
+    node,
+    telemetry.recordId,
+    telemetry.legacyNumericRecordId
+  );
   const pendingPath = path.join(outboxPaths.pending, fileName);
   const donePath = path.join(outboxPaths.done, fileName);
 
@@ -637,7 +668,7 @@ function updateLatest(node, telemetry, sampledAt, receivedAt) {
 function writeTelemetryPoint(node, telemetry, sampledAt) {
   const point = new Point('node_metrics')
     .tag('node', node)
-    .intField('record_id', telemetry.recordId)
+    .stringField('record_uid', String(telemetry.recordId))
     .intField('seq', telemetry.sequence)
     .intField('status', telemetry.status)
     .booleanField('fault_detail_valid', telemetry.faultDetailValid)
@@ -645,6 +676,16 @@ function writeTelemetryPoint(node, telemetry, sampledAt) {
     .booleanField('recovered', telemetry.recovered)
     .booleanField('timestamp_valid', true)
     .timestamp(sampledAt);
+
+  const legacyRecordId = Number.isSafeInteger(telemetry.legacyNumericRecordId)
+    ? telemetry.legacyNumericRecordId
+    : Number.isSafeInteger(telemetry.recordId)
+      ? telemetry.recordId
+      : null;
+
+  if (legacyRecordId !== null) {
+    point.intField('record_id', legacyRecordId);
+  }
 
   if (telemetry.sampleAgeMs !== null) {
     point.intField('age_ms', telemetry.sampleAgeMs);
@@ -666,7 +707,7 @@ function writeTelemetryPoint(node, telemetry, sampledAt) {
 function writeRecoveredUnstampedPoint(node, telemetry, receivedAt) {
   const point = new Point('node_recovered_unstamped')
     .tag('node', node)
-    .intField('record_id', telemetry.recordId)
+    .stringField('record_uid', String(telemetry.recordId))
     .intField('seq', telemetry.sequence)
     .intField('status', telemetry.status)
     .booleanField('fault_detail_valid', telemetry.faultDetailValid)
@@ -674,6 +715,16 @@ function writeRecoveredUnstampedPoint(node, telemetry, receivedAt) {
     .booleanField('recovered', true)
     .booleanField('timestamp_valid', false)
     .timestamp(receivedAt);
+
+  const legacyRecordId = Number.isSafeInteger(telemetry.legacyNumericRecordId)
+    ? telemetry.legacyNumericRecordId
+    : Number.isSafeInteger(telemetry.recordId)
+      ? telemetry.recordId
+      : null;
+
+  if (legacyRecordId !== null) {
+    point.intField('record_id', legacyRecordId);
+  }
 
   if (telemetry.faultDetailValid) {
     telemetry.sensorFaults.forEach((faultCode, sensorIndex) => {
@@ -740,6 +791,7 @@ app.get('/health', (_request, response) => {
     mqttPersistentSession: true,
     mqttSessionPresent,
     mqttClientId: config.mqttClientId,
+    recordIdMode: 'global-string',
     lastMessageAt: lastMqttMessageAt,
     influxBucket: config.influxBucket,
     influxReliabilityMode: 'durable-disk-outbox',
