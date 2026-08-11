@@ -34,7 +34,9 @@ const API_BASE_URL =
 const NODE_IDS = ['node01', 'node02', 'node03'];
 const SENSOR_IDS = [0, 1, 2, 3, 4, 5];
 const POLL_INTERVAL_MS = 2000;
-const MAX_HISTORY_POINTS = 160;
+const HISTORY_REFRESH_MS = 5000;
+const HISTORY_RANGE_MINUTES = 15;
+const HISTORY_WINDOW_SECONDS = 5;
 const OFFLINE_TIMEOUT_MS_RAW = Number(import.meta.env.VITE_NODE_OFFLINE_MS || 12000);
 const OFFLINE_TIMEOUT_MS = Number.isFinite(OFFLINE_TIMEOUT_MS_RAW)
   ? OFFLINE_TIMEOUT_MS_RAW
@@ -65,8 +67,11 @@ const MAINTENANCE_TEMPLATE = [
 ];
 
 function decodeSensorBits(statusByte) {
-  const safeStatus = Number.isInteger(statusByte) ? statusByte : 0;
-  return SENSOR_IDS.map((bit) => ((safeStatus >> bit) & 0x01) === 1);
+  if (!Number.isInteger(statusByte)) {
+    return SENSOR_IDS.map(() => null);
+  }
+
+  return SENSOR_IDS.map((bit) => ((statusByte >> bit) & 0x01) === 1);
 }
 
 function formatNodeName(nodeId) {
@@ -80,11 +85,24 @@ function formatDateKey(date) {
   return `${year}-${month}-${day}`;
 }
 
-function isNodeOnline(updatedAt, nowMs) {
-  if (!updatedAt) return false;
-  const timestamp = Date.parse(updatedAt);
+function isNodeOnline(lastSeenAt, nowMs) {
+  if (!lastSeenAt) return false;
+
+  const timestamp = Date.parse(lastSeenAt);
+
   if (Number.isNaN(timestamp)) return false;
+
   return nowMs - timestamp <= OFFLINE_TIMEOUT_MS;
+}
+
+function formatHistoryTime(value) {
+  const timestamp = Date.parse(value);
+
+  if (Number.isNaN(timestamp)) {
+    return value || '';
+  }
+
+  return new Date(timestamp).toLocaleTimeString('en-GB', { hour12: false });
 }
 
 function AnimatedNumber({
@@ -188,42 +206,24 @@ function App() {
         if (!latestResponse.ok) {
           throw new Error(`HTTP ${latestResponse.status}`);
         }
+
         if (!healthResponse.ok) {
           throw new Error(`HTTP ${healthResponse.status}`);
         }
 
-        const [payload, healthPayload] = await Promise.all([
+        const [latestPayload, healthPayload] = await Promise.all([
           latestResponse.json(),
           healthResponse.json()
         ]);
+
         if (!active) return;
 
-        setLatestByNode(payload);
+        setLatestByNode(latestPayload);
         setGatewayHealth({
           mqttConnected: healthPayload?.mqttConnected === true,
           lastMessageAt: healthPayload?.lastMessageAt || null
         });
         setLastError('');
-
-        const now = new Date();
-        const timeLabel = now.toLocaleTimeString('en-GB', { hour12: false });
-
-        setHistory((previous) => {
-          const point = { time: timeLabel };
-
-          NODE_IDS.forEach((nodeId) => {
-            const value = payload?.[nodeId]?.temp_avg;
-            const updatedAt = payload?.[nodeId]?.updatedAt;
-            const online = isNodeOnline(updatedAt, now.getTime());
-            point[nodeId] = online && Number.isFinite(value) ? value : null;
-          });
-
-          const next = [...previous, point];
-          if (next.length > MAX_HISTORY_POINTS) {
-            return next.slice(next.length - MAX_HISTORY_POINTS);
-          }
-          return next;
-        });
       } catch (error) {
         if (active) {
           setLastError(error instanceof Error ? error.message : 'Unable to fetch data');
@@ -233,6 +233,40 @@ function App() {
 
     pullLatest();
     const interval = window.setInterval(pullLatest, POLL_INTERVAL_MS);
+
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+    };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+
+    const pullHistory = async () => {
+      try {
+        const response = await fetch(
+          `${API_BASE_URL}/history?minutes=${HISTORY_RANGE_MINUTES}&window=${HISTORY_WINDOW_SECONDS}`
+        );
+
+        if (!response.ok) {
+          throw new Error(`History HTTP ${response.status}`);
+        }
+
+        const payload = await response.json();
+
+        if (!active) return;
+
+        setHistory(Array.isArray(payload?.points) ? payload.points : []);
+      } catch (error) {
+        if (active) {
+          console.error('Unable to fetch history:', error);
+        }
+      }
+    };
+
+    pullHistory();
+    const interval = window.setInterval(pullHistory, HISTORY_REFRESH_MS);
 
     return () => {
       active = false;
@@ -251,24 +285,36 @@ function App() {
     () =>
       NODE_IDS.map((nodeId) => {
         const nodeData = latestByNode?.[nodeId] || {};
-        const online = isNodeOnline(nodeData.updatedAt, nowTick);
-        const temp = Number.isFinite(nodeData.temp_avg) ? nodeData.temp_avg : null;
-        const status = Number.isInteger(nodeData.status) ? nodeData.status : 0;
-        const sensorFaultBits = online ? decodeSensorBits(status) : SENSOR_IDS.map(() => null);
+        const online = isNodeOnline(nodeData.lastSeenAt, nowTick);
+        const temperatureValid = nodeData.tempValid === true;
+        const temp =
+          online && temperatureValid && Number.isFinite(nodeData.temp_avg)
+            ? nodeData.temp_avg
+            : null;
+        const statusKnown = online && Number.isInteger(nodeData.status);
+        const status = statusKnown ? nodeData.status : null;
+        const sensorFaultBits = statusKnown
+          ? decodeSensorBits(status)
+          : SENSOR_IDS.map(() => null);
+        const faults = sensorFaultBits.filter((value) => value === true).length;
+        const unknownSensors = sensorFaultBits.filter((value) => value === null).length;
+
         return {
           id: nodeId,
+          seq: Number.isInteger(nodeData.seq) ? nodeData.seq : null,
           temp,
+          temperatureValid,
           status,
           online,
-          updatedAt: nodeData.updatedAt,
+          lastSeenAt: nodeData.lastSeenAt || null,
+          tempUpdatedAt: nodeData.tempUpdatedAt || null,
           sensorFaultBits,
-          faults: sensorFaultBits.filter(Boolean).length,
-          unknownSensors: online ? 0 : SENSOR_IDS.length
+          faults,
+          unknownSensors
         };
       }),
     [latestByNode, nowTick]
   );
-
   const filteredNodes = useMemo(
     () =>
       nodeCards.filter((node) =>
@@ -517,7 +563,7 @@ function App() {
                         ))}
                       </defs>
                       <CartesianGrid strokeDasharray="4 4" stroke="#e6ebea" />
-                      <XAxis dataKey="time" minTickGap={26} stroke="#8aa19a" />
+                      <XAxis dataKey="time" minTickGap={26} stroke="#8aa19a" tickFormatter={formatHistoryTime} />
                       <YAxis stroke="#8aa19a" unit="°C" />
                       <Tooltip
                         contentStyle={{
@@ -528,6 +574,8 @@ function App() {
                         formatter={(value) =>
                           value === null || value === undefined ? 'N/A' : `${Number(value).toFixed(2)} °C`
                         }
+                      
+                        labelFormatter={formatHistoryTime}
                       />
                       <Legend />
                       {NODE_IDS.map((nodeId) => (
@@ -559,7 +607,13 @@ function App() {
                   </div>
                   <div className="node-list">
                     {filteredNodes.map((node, index) => {
-                      const tone = node.online ? (node.faults ? 'fault' : 'ok') : 'offline';
+                      const tone = !node.online
+                        ? 'offline'
+                        : node.unknownSensors > 0
+                          ? 'unknown'
+                          : node.faults > 0
+                            ? 'fault'
+                            : 'ok';
                       return (
                       <div
                         className={`node-row ${tone}`}
@@ -572,8 +626,14 @@ function App() {
                         </div>
                         <div className="row-right">
                           <span>{node.online && node.temp !== null ? `${node.temp.toFixed(2)}°C` : '--'}</span>
-                          <em className={node.online ? (node.faults ? 'fault' : 'ok') : 'offline'}>
-                            {node.online ? (node.faults ? `${node.faults} faults` : 'All good') : 'Offline'}
+                          <em className={tone}>
+                            {!node.online
+                              ? 'Offline'
+                              : node.unknownSensors > 0
+                                ? 'Unknown'
+                                : node.faults > 0
+                                  ? `${node.faults} faults`
+                                  : 'All good'}
                           </em>
                         </div>
                       </div>

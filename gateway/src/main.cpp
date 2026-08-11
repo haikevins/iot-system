@@ -1,7 +1,7 @@
 #include <SPI.h>
 #include <LoRa.h>
 #include <WiFi.h>
-#include <PubSubClient.h>
+#include <mqtt_client.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/queue.h>
@@ -31,6 +31,11 @@
 #define DUPLICATE_ACK_WINDOW_MS            700UL
 #define NODE_CYCLE_DELAY_MS                1000UL
 #define LORA_RECEIVE_POLL_DELAY_MS         5UL
+#define MQTT_ENQUEUE_RETRY_DELAY_MS         1000UL
+#define MQTT_ACK_CHECK_PERIOD_MS             250UL
+#define MQTT_ACK_WATCHDOG_MS                 60000UL
+#define MQTT_RETRANSMIT_TIMEOUT_MS           3000
+#define TELEMETRY_QUEUE_LENGTH              32U
 
 #define ENABLE_DIAG_LOG                    1
 
@@ -69,13 +74,16 @@ struct ProtocolPacket
 struct TelemetryMessage
 {
     uint8_t address;
+    uint8_t sequence;
     int16_t temperatureCentiCelsius;
     uint8_t status;
 };
 
-WiFiClient g_wifiClient;
-PubSubClient g_mqttClient(g_wifiClient);
+esp_mqtt_client_handle_t g_mqttClient = nullptr;
 QueueHandle_t g_telemetryQueue = nullptr;
+TaskHandle_t g_mqttTaskHandle = nullptr;
+
+static volatile bool s_mqttConnected = false;
 
 static uint8_t s_currentNodeIndex = 0U;
 static uint8_t s_nextSequence[NUM_NODES] = {0U};
@@ -393,106 +401,190 @@ static void EnsureWiFiConnected(void)
 }
 
 /**
- * @brief  Ensures the MQTT client is connected to the configured broker.
+ * @brief  Receives ESP-MQTT connection and publish acknowledgement events.
+ * @note   MQTT_EVENT_PUBLISHED is emitted only after the broker acknowledges a QoS 1/2 publish.
+ * @param  handlerArgs: Event handler context, unused.
+ * @param  eventBase: ESP event base, unused.
+ * @param  eventId: MQTT event identifier.
+ * @param  eventData: Pointer to esp_mqtt_event_t.
  * @retval None
  */
-static void EnsureMqttConnected(void)
+static void MqttEventHandler(void *handlerArgs,
+    esp_event_base_t eventBase,
+    int32_t eventId,
+    void *eventData)
 {
-    while (!g_mqttClient.connected())
+    (void)handlerArgs;
+    (void)eventBase;
+
+    esp_mqtt_event_handle_t event = (esp_mqtt_event_handle_t)eventData;
+
+    switch ((esp_mqtt_event_id_t)eventId)
     {
-        if (g_mqttClient.connect(MQTT_CLIENT_ID, MQTT_USER, MQTT_PASSWORD))
+        case MQTT_EVENT_CONNECTED:
         {
-            Serial.println("MQTT connected");
-            return;
+            s_mqttConnected = true;
+            Serial.println("MQTT connected (QoS 1 enabled)");
+            break;
         }
 
-        Serial.print("MQTT connect failed, rc=");
-        Serial.println(g_mqttClient.state());
-        vTaskDelay(pdMS_TO_TICKS(2000));
+        case MQTT_EVENT_DISCONNECTED:
+        {
+            s_mqttConnected = false;
+            Serial.println("MQTT disconnected");
+            break;
+        }
+
+        case MQTT_EVENT_PUBLISHED:
+        {
+            if (g_mqttTaskHandle != nullptr)
+            {
+                xTaskNotify(g_mqttTaskHandle,
+                    (uint32_t)event->msg_id,
+                    eSetValueWithOverwrite);
+            }
+
+            break;
+        }
+
+        case MQTT_EVENT_ERROR:
+        {
+            Serial.println("MQTT transport/protocol error");
+            break;
+        }
+
+        default:
+        {
+            break;
+        }
     }
 }
 
 /**
- * @brief  Publishes node temperature and sensor status to MQTT.
- * @note   Invalid temperature marker 0x8000 is not published to temp_avg;
- *         status is still published so the backend retains the fault state.
- * @param  message: Telemetry message to publish.
- * @retval None
+ * @brief  Initializes the native ESP-MQTT client with QoS 1 retransmission support.
+ * @note   Clean Session is disabled so the broker can preserve the MQTT session across reconnects.
+ * @note   ESP-MQTT keeps unacknowledged QoS 1 messages in its outbox and retransmits them.
+ * @retval true when the client is created and started successfully, otherwise false.
  */
-static void PublishNodeData(const TelemetryMessage &message)
+static bool InitializeMqttClient(void)
+{
+    esp_mqtt_client_config_t mqttConfig = {};
+
+    mqttConfig.host = MQTT_BROKER;
+    mqttConfig.port = MQTT_PORT;
+    mqttConfig.transport = MQTT_TRANSPORT_OVER_TCP;
+    mqttConfig.username = MQTT_USER;
+    mqttConfig.password = MQTT_PASSWORD;
+    mqttConfig.client_id = MQTT_CLIENT_ID;
+    mqttConfig.disable_clean_session = true;
+    mqttConfig.keepalive = 30;
+    mqttConfig.reconnect_timeout_ms = 2000;
+    mqttConfig.message_retransmit_timeout = MQTT_RETRANSMIT_TIMEOUT_MS;
+
+    g_mqttClient = esp_mqtt_client_init(&mqttConfig);
+
+    if (g_mqttClient == nullptr)
+    {
+        Serial.println("MQTT client init failed");
+        return false;
+    }
+
+    if (esp_mqtt_client_register_event(g_mqttClient,
+        MQTT_EVENT_ANY,
+        MqttEventHandler,
+        nullptr) != ESP_OK)
+    {
+        Serial.println("MQTT event registration failed");
+        return false;
+    }
+
+    if (esp_mqtt_client_start(g_mqttClient) != ESP_OK)
+    {
+        Serial.println("MQTT client start failed");
+        return false;
+    }
+
+    return true;
+}
+
+/**
+ * @brief  Enqueues one telemetry object for MQTT QoS 1 delivery.
+ * @note   Topic format: iot/<node>/telemetry.
+ * @note   Payload contains seq, temp, tempValid and status in one JSON object.
+ * @note   The message remains pending until MQTT_EVENT_PUBLISHED confirms broker PUBACK.
+ * @param  message: Telemetry message to enqueue.
+ * @retval Positive MQTT message ID on success, or -1 on failure.
+ */
+static int EnqueueTelemetryQos1(const TelemetryMessage &message)
 {
     const char *nodeName = GetNodeName(message.address);
 
-    if (nodeName == nullptr)
+    if ((nodeName == nullptr) || (g_mqttClient == nullptr))
     {
-        return;
+        return -1;
     }
 
-    char temperatureTopic[32];
-    char statusTopic[32];
-    char temperaturePayload[20];
-    char statusPayload[8];
+    char telemetryTopic[40];
+    char telemetryPayload[128];
 
-    snprintf(temperatureTopic,
-        sizeof(temperatureTopic),
-        "iot/%s/temp_avg",
+    snprintf(telemetryTopic,
+        sizeof(telemetryTopic),
+        "iot/%s/telemetry",
         nodeName);
-    snprintf(statusTopic,
-        sizeof(statusTopic),
-        "iot/%s/status",
-        nodeName);
-    snprintf(statusPayload,
-        sizeof(statusPayload),
-        "%u",
-        message.status);
-
-    bool temperaturePublished = true;
-
-    if (message.temperatureCentiCelsius != TEMPERATURE_INVALID_CENTI_C)
-    {
-        int32_t temperatureValue = message.temperatureCentiCelsius;
-        const bool isNegative = temperatureValue < 0;
-
-        if (isNegative)
-        {
-            temperatureValue = -temperatureValue;
-        }
-
-        snprintf(temperaturePayload,
-            sizeof(temperaturePayload),
-            "%s%ld.%02ld",
-            isNegative ? "-" : "",
-            (long)(temperatureValue / 100L),
-            (long)(temperatureValue % 100L));
-
-        temperaturePublished = g_mqttClient.publish(temperatureTopic,
-            temperaturePayload,
-            true);
-    }
-
-    const bool statusPublished = g_mqttClient.publish(statusTopic,
-        statusPayload,
-        true);
-
-    if (!temperaturePublished || !statusPublished)
-    {
-        Serial.println("MQTT publish failed");
-        return;
-    }
 
     if (message.temperatureCentiCelsius == TEMPERATURE_INVALID_CENTI_C)
     {
-        LOGI("[MQTT] %s temp=INVALID status=%u\n",
-            nodeName,
+        snprintf(telemetryPayload,
+            sizeof(telemetryPayload),
+            "{\"seq\":%u,\"temp\":null,\"tempValid\":false,\"status\":%u}",
+            message.sequence,
             message.status);
     }
     else
     {
-        LOGI("[MQTT] %s temp=%s status=%u\n",
-            nodeName,
-            temperaturePayload,
+        int32_t absoluteTemperature = message.temperatureCentiCelsius;
+        const bool isNegative = absoluteTemperature < 0;
+
+        if (isNegative)
+        {
+            absoluteTemperature = -absoluteTemperature;
+        }
+
+        char temperatureText[20];
+
+        snprintf(temperatureText,
+            sizeof(temperatureText),
+            "%s%ld.%02ld",
+            isNegative ? "-" : "",
+            (long)(absoluteTemperature / 100L),
+            (long)(absoluteTemperature % 100L));
+
+        snprintf(telemetryPayload,
+            sizeof(telemetryPayload),
+            "{\"seq\":%u,\"temp\":%s,\"tempValid\":true,\"status\":%u}",
+            message.sequence,
+            temperatureText,
             message.status);
     }
+
+    const int mqttMessageId = esp_mqtt_client_enqueue(g_mqttClient,
+        telemetryTopic,
+        telemetryPayload,
+        0,
+        1,
+        0,
+        true);
+
+    if (mqttMessageId >= 0)
+    {
+        LOGI("[MQTT-QOS1-TX] %s seq=%u msg_id=%d payload=%s\n",
+            nodeName,
+            message.sequence,
+            mqttMessageId,
+            telemetryPayload);
+    }
+
+    return mqttMessageId;
 }
 
 /**
@@ -503,12 +595,14 @@ static void PublishNodeData(const TelemetryMessage &message)
  * @retval 1 when queued successfully, otherwise 0.
  */
 static bool EnqueueTelemetry(uint8_t address,
+    uint8_t sequence,
     int16_t temperatureCentiCelsius,
     uint8_t status)
 {
     TelemetryMessage message =
     {
         address,
+        sequence,
         temperatureCentiCelsius,
         status
     };
@@ -558,29 +652,108 @@ static void AcknowledgeDuplicateRetries(uint8_t address, uint8_t sequence)
 }
 
 /**
- * @brief  Maintains Wi-Fi/MQTT and publishes queued telemetry.
+ * @brief  Maintains Wi-Fi and delivers queued telemetry with MQTT QoS 1.
+ * @note   A telemetry item is removed only after broker PUBACK is received.
+ * @note   ESP-MQTT handles retransmission of an unacknowledged QoS 1 message after reconnect.
  * @param  parameter: FreeRTOS task parameter, unused.
  * @retval Never returns.
  */
 static void MqttTask(void *parameter)
 {
     (void)parameter;
-    TelemetryMessage message;
+
+    TelemetryMessage pendingMessage;
+    bool hasPendingMessage = false;
+    bool waitingForPubAck = false;
+    int pendingMqttMessageId = -1;
+    uint32_t enqueueFailureCount = 0UL;
+    uint32_t pubAckCount = 0UL;
+    unsigned long mqttEnqueueTimeMs = 0UL;
 
     for (;;)
     {
         EnsureWiFiConnected();
 
-        if (!g_mqttClient.connected())
+        if (!hasPendingMessage)
         {
-            EnsureMqttConnected();
+            if (xQueueReceive(g_telemetryQueue,
+                &pendingMessage,
+                0) == pdPASS)
+            {
+                hasPendingMessage = true;
+                waitingForPubAck = false;
+                pendingMqttMessageId = -1;
+            }
         }
 
-        g_mqttClient.loop();
-
-        while (xQueueReceive(g_telemetryQueue, &message, 0) == pdPASS)
+        if (hasPendingMessage &&
+            !waitingForPubAck &&
+            s_mqttConnected)
         {
-            PublishNodeData(message);
+            pendingMqttMessageId = EnqueueTelemetryQos1(pendingMessage);
+
+            if (pendingMqttMessageId >= 0)
+            {
+                waitingForPubAck = true;
+                mqttEnqueueTimeMs = millis();
+            }
+            else
+            {
+                enqueueFailureCount++;
+                Serial.printf("MQTT QoS1 enqueue failed, retry=%lu\n",
+                    (unsigned long)enqueueFailureCount);
+
+                vTaskDelay(pdMS_TO_TICKS(MQTT_ENQUEUE_RETRY_DELAY_MS));
+                continue;
+            }
+        }
+
+        if (waitingForPubAck)
+        {
+            uint32_t acknowledgedMessageId = 0U;
+
+            if (xTaskNotifyWait(0U,
+                UINT32_MAX,
+                &acknowledgedMessageId,
+                pdMS_TO_TICKS(MQTT_ACK_CHECK_PERIOD_MS)) == pdTRUE)
+            {
+                if ((int)acknowledgedMessageId == pendingMqttMessageId)
+                {
+                    pubAckCount++;
+
+                    LOGI("[MQTT-PUBACK] seq=%u msg_id=%d count=%lu\n",
+                        pendingMessage.sequence,
+                        pendingMqttMessageId,
+                        (unsigned long)pubAckCount);
+
+                    hasPendingMessage = false;
+                    waitingForPubAck = false;
+                    pendingMqttMessageId = -1;
+                    continue;
+                }
+
+                LOGI("[MQTT] Ignored unexpected PUBACK msg_id=%lu expected=%d\n",
+                    (unsigned long)acknowledgedMessageId,
+                    pendingMqttMessageId);
+            }
+
+            /*
+             * ESP-MQTT normally keeps QoS 1 data in its internal outbox until PUBACK.
+             * If the outbox is empty for an extended period but this application has
+             * not observed PUBACK, allow the same telemetry object to be enqueued again.
+             */
+            if (((millis() - mqttEnqueueTimeMs) >= MQTT_ACK_WATCHDOG_MS) &&
+                s_mqttConnected &&
+                (esp_mqtt_client_get_outbox_size(g_mqttClient) == 0))
+            {
+                Serial.printf("MQTT PUBACK watchdog expired for msg_id=%d; requeueing\n",
+                    pendingMqttMessageId);
+
+                waitingForPubAck = false;
+                pendingMqttMessageId = -1;
+            }
+
+            continue;
         }
 
         vTaskDelay(pdMS_TO_TICKS(20));
@@ -641,9 +814,18 @@ static void LoraTask(void *parameter)
                     DecodeTemperatureCentiCelsius(packet.data);
                 const uint8_t status = (uint8_t)(packet.data[2] & 0x3FU);
 
-                EnqueueTelemetry(currentNodeAddress,
+                const bool queued = EnqueueTelemetry(currentNodeAddress,
+                    currentSequence,
                     temperatureCentiCelsius,
                     status);
+
+                if (!queued)
+                {
+                    LOGI("[QUEUE] node=%02X seq=%u full, DATA not ACKed\n",
+                        currentNodeAddress,
+                        currentSequence);
+                    continue;
+                }
 
                 SendAcknowledgement(currentNodeAddress, currentSequence);
 
@@ -717,10 +899,10 @@ void setup(void)
     LoRa.setPreambleLength(8);
     LoRa.enableCrc();
 
-    g_mqttClient.setServer(MQTT_BROKER, MQTT_PORT);
     WiFi.mode(WIFI_STA);
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
-    g_telemetryQueue = xQueueCreate(16, sizeof(TelemetryMessage));
+    g_telemetryQueue = xQueueCreate(TELEMETRY_QUEUE_LENGTH, sizeof(TelemetryMessage));
 
     if (g_telemetryQueue == nullptr)
     {
@@ -737,8 +919,18 @@ void setup(void)
         6144,
         nullptr,
         1,
-        nullptr,
+        &g_mqttTaskHandle,
         1);
+
+    if (!InitializeMqttClient())
+    {
+        Serial.println("MQTT initialization failed");
+
+        while (1)
+        {
+            delay(1000);
+        }
+    }
 
     xTaskCreatePinnedToCore(LoraTask,
         "loraTask",
@@ -748,7 +940,7 @@ void setup(void)
         nullptr,
         0);
 
-    Serial.println("Gateway ready (protocol v2: SEQ + ACK/retry + fixed-point temperature)");
+    Serial.println("Gateway ready (protocol v4: MQTT QoS 1 + broker PUBACK)");
 }
 
 /**

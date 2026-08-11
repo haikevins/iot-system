@@ -1195,3 +1195,18 @@
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
+
+
+/* telemetry-v3 unknown state */
+.node-row.unknown {
+  background: #fffbeb;
+  border-color: #fde68a;
+}
+
+.node-dot.unknown {
+  background: #f59e0b;
+}
+
+.row-right em.unknown {
+  color: #b45309;
+}
