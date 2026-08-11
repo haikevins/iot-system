@@ -5,7 +5,7 @@
 
 #define NODE_RECEIVE_TIMEOUT_MS             2000U
 #define DATA_TRANSMIT_TIMEOUT_MS            1000U
-#define ACK_WAIT_TIMEOUT_MS                 250U
+#define ACK_WAIT_TIMEOUT_MS                 500U
 #define DATA_TRANSMIT_MAX_ATTEMPTS          3U
 #define TEMPERATURE_PAYLOAD_LENGTH          3U
 #define TEMPERATURE_SCALE                   100.0f

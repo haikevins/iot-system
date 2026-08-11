@@ -29,8 +29,9 @@ if (missingVars.length > 0) {
 
 const app = express();
 const latestByNode = {};
-const recentTelemetryByNode = new Map();
-const MQTT_DUPLICATE_WINDOW_MS = 30000;
+const recentRecordIds = new Map();
+const MQTT_RECORD_DEDUPE_TTL_MS = 24 * 60 * 60 * 1000;
+const MQTT_RECORD_DEDUPE_MAX_ENTRIES = 4096;
 let lastMqttMessageAt = null;
 let mqttSessionPresent = false;
 let duplicateMqttMessageCount = 0;
@@ -93,11 +94,19 @@ function parseTelemetryPayload(topic, payloadBuffer) {
     throw new Error(`Invalid JSON for ${topic}: ${error.message}`);
   }
 
+  const recordId = payload?.id;
   const sequence = payload?.seq;
   const status = payload?.status;
   const temperatureValid = payload?.tempValid;
   const temperature = payload?.temp;
-  const sampleAgeMs = payload?.ageMs;
+  const sampledAtMs = payload?.sampledAtMs ?? null;
+  const sampleAgeMs = payload?.ageMs ?? null;
+  const timestampValid = payload?.timestampValid ?? true;
+  const recovered = payload?.recovered ?? false;
+
+  if (!Number.isSafeInteger(recordId) || recordId < 0) {
+    throw new Error(`Invalid id for ${topic}`);
+  }
 
   if (!Number.isInteger(sequence) || sequence < 0 || sequence > 255) {
     throw new Error(`Invalid seq for ${topic}`);
@@ -119,58 +128,96 @@ function parseTelemetryPayload(topic, payloadBuffer) {
     throw new Error(`tempValid=false requires temp=null for ${topic}`);
   }
 
-  if (!Number.isInteger(sampleAgeMs) || sampleAgeMs < 0 || sampleAgeMs > 0xffffffff) {
+  if (sampledAtMs !== null &&
+      (!Number.isSafeInteger(sampledAtMs) || sampledAtMs < 0)) {
+    throw new Error(`Invalid sampledAtMs for ${topic}`);
+  }
+
+  if (sampleAgeMs !== null &&
+      (!Number.isInteger(sampleAgeMs) || sampleAgeMs < 0 || sampleAgeMs > 0xffffffff)) {
     throw new Error(`Invalid ageMs for ${topic}`);
   }
 
+  if (typeof timestampValid !== 'boolean') {
+    throw new Error(`Invalid timestampValid for ${topic}`);
+  }
+
+  if (typeof recovered !== 'boolean') {
+    throw new Error(`Invalid recovered for ${topic}`);
+  }
+
+  if (timestampValid && sampledAtMs === null && sampleAgeMs === null) {
+    throw new Error(`timestampValid=true requires sampledAtMs or ageMs for ${topic}`);
+  }
+
   return {
+    recordId,
     sequence,
     status,
     temperatureValid,
     temperature: temperatureValid ? Number(temperature) : null,
-    sampleAgeMs
+    sampledAtMs,
+    sampleAgeMs,
+    timestampValid,
+    recovered
   };
 }
 
 
 function isDuplicateTelemetry(node, telemetry, receivedAt) {
-  const fingerprint = JSON.stringify({
-    seq: telemetry.sequence,
-    status: telemetry.status,
-    tempValid: telemetry.temperatureValid,
-    temp: telemetry.temperature
-  });
-
-  const previous = recentTelemetryByNode.get(node);
+  const key = `${node}:${telemetry.recordId}`;
   const receivedAtMs = receivedAt.getTime();
+  const previousSeenAtMs = recentRecordIds.get(key);
 
-  if (
-    previous &&
-    previous.sequence === telemetry.sequence &&
-    previous.fingerprint === fingerprint &&
-    receivedAtMs - previous.receivedAtMs <= MQTT_DUPLICATE_WINDOW_MS
-  ) {
+  if (previousSeenAtMs !== undefined) {
+    recentRecordIds.set(key, receivedAtMs);
     return true;
   }
 
-  recentTelemetryByNode.set(node, {
-    sequence: telemetry.sequence,
-    fingerprint,
-    receivedAtMs
-  });
+  recentRecordIds.set(key, receivedAtMs);
+
+  if (recentRecordIds.size > MQTT_RECORD_DEDUPE_MAX_ENTRIES) {
+    const cutoff = receivedAtMs - MQTT_RECORD_DEDUPE_TTL_MS;
+
+    for (const [recordKey, seenAtMs] of recentRecordIds.entries()) {
+      if (seenAtMs < cutoff || recentRecordIds.size > MQTT_RECORD_DEDUPE_MAX_ENTRIES) {
+        recentRecordIds.delete(recordKey);
+      }
+    }
+  }
 
   return false;
 }
 
-function calculateSampledAt(receivedAt, sampleAgeMs) {
-  return new Date(receivedAt.getTime() - sampleAgeMs);
+function calculateSampledAt(receivedAt, telemetry) {
+  if (!telemetry.timestampValid) {
+    return null;
+  }
+
+  if (telemetry.sampledAtMs !== null) {
+    return new Date(telemetry.sampledAtMs);
+  }
+
+  if (telemetry.sampleAgeMs !== null) {
+    return new Date(receivedAt.getTime() - telemetry.sampleAgeMs);
+  }
+
+  return null;
 }
 
 function updateLatest(node, telemetry, sampledAt, receivedAt) {
   const previousState = latestByNode[node] || {};
+  const previousSampledAtMs = previousState.sampledAt
+    ? Date.parse(previousState.sampledAt)
+    : Number.NEGATIVE_INFINITY;
+
+  if (sampledAt.getTime() < previousSampledAtMs) {
+    return false;
+  }
 
   latestByNode[node] = {
     ...previousState,
+    id: telemetry.recordId,
     seq: telemetry.sequence,
     temp_avg: telemetry.temperatureValid ? telemetry.temperature : null,
     tempValid: telemetry.temperatureValid,
@@ -184,16 +231,42 @@ function updateLatest(node, telemetry, sampledAt, receivedAt) {
       ? sampledAt.toISOString()
       : previousState.tempUpdatedAt || null
   };
+
+  return true;
 }
 
 function writeTelemetryPoint(node, telemetry, sampledAt) {
   const point = new Point('node_metrics')
     .tag('node', node)
+    .intField('record_id', telemetry.recordId)
     .intField('seq', telemetry.sequence)
     .intField('status', telemetry.status)
-    .intField('age_ms', telemetry.sampleAgeMs)
     .booleanField('temp_valid', telemetry.temperatureValid)
+    .booleanField('recovered', telemetry.recovered)
+    .booleanField('timestamp_valid', true)
     .timestamp(sampledAt);
+
+  if (telemetry.sampleAgeMs !== null) {
+    point.intField('age_ms', telemetry.sampleAgeMs);
+  }
+
+  if (telemetry.temperatureValid) {
+    point.floatField('temp_avg', telemetry.temperature);
+  }
+
+  writeApi.writePoint(point);
+}
+
+function writeRecoveredUnstampedPoint(node, telemetry, receivedAt) {
+  const point = new Point('node_recovered_unstamped')
+    .tag('node', node)
+    .intField('record_id', telemetry.recordId)
+    .intField('seq', telemetry.sequence)
+    .intField('status', telemetry.status)
+    .booleanField('temp_valid', telemetry.temperatureValid)
+    .booleanField('recovered', true)
+    .booleanField('timestamp_valid', false)
+    .timestamp(receivedAt);
 
   if (telemetry.temperatureValid) {
     point.floatField('temp_avg', telemetry.temperature);
@@ -214,10 +287,16 @@ function handleMessage(topic, payloadBuffer) {
   try {
     const telemetry = parseTelemetryPayload(topic, payloadBuffer);
     const receivedAt = new Date();
-    const sampledAt = calculateSampledAt(receivedAt, telemetry.sampleAgeMs);
+    const sampledAt = calculateSampledAt(receivedAt, telemetry);
 
     if (isDuplicateTelemetry(node, telemetry, receivedAt)) {
       duplicateMqttMessageCount += 1;
+      lastMqttMessageAt = receivedAt.toISOString();
+      return;
+    }
+
+    if (sampledAt === null) {
+      writeRecoveredUnstampedPoint(node, telemetry, receivedAt);
       lastMqttMessageAt = receivedAt.toISOString();
       return;
     }

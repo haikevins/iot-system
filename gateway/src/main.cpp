@@ -2,9 +2,13 @@
 #include <LoRa.h>
 #include <WiFi.h>
 #include <mqtt_client.h>
+#include <nvs.h>
+#include <nvs_flash.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
-#include <freertos/queue.h>
+#include <freertos/semphr.h>
+#include <time.h>
+#include <sys/time.h>
 
 #define LORA_SS_PIN                        27
 #define LORA_RESET_PIN                     14
@@ -35,7 +39,17 @@
 #define MQTT_ACK_CHECK_PERIOD_MS             250UL
 #define MQTT_ACK_WATCHDOG_MS                 60000UL
 #define MQTT_RETRANSMIT_TIMEOUT_MS           3000
-#define TELEMETRY_QUEUE_LENGTH              32U
+
+#define PERSISTENT_OUTBOX_NAMESPACE          "tel_outbox"
+#define PERSISTENT_OUTBOX_BOOT_KEY           "boot"
+#define PERSISTENT_OUTBOX_CAPACITY           64U
+#define PERSISTENT_RECORD_MAGIC              0x544C4D31UL
+#define PERSISTENT_RECORD_VERSION            1U
+
+#define TIME_SYNC_TIMEOUT_MS                 8000UL
+#define MIN_VALID_UNIX_TIME_SECONDS          1704067200LL
+#define NTP_SERVER_PRIMARY                   "pool.ntp.org"
+#define NTP_SERVER_SECONDARY                 "time.google.com"
 
 #define ENABLE_DIAG_LOG                    1
 
@@ -78,11 +92,29 @@ struct TelemetryMessage
     int16_t temperatureCentiCelsius;
     uint8_t status;
     uint32_t capturedAtMs;
+    uint32_t bootId;
+    uint64_t sampledAtUnixMs;
+};
+
+struct PersistentTelemetryRecord
+{
+    uint32_t magic;
+    uint16_t version;
+    uint16_t reserved;
+    uint64_t recordId;
+    TelemetryMessage message;
 };
 
 esp_mqtt_client_handle_t g_mqttClient = nullptr;
-QueueHandle_t g_telemetryQueue = nullptr;
 TaskHandle_t g_mqttTaskHandle = nullptr;
+SemaphoreHandle_t g_outboxMutex = nullptr;
+
+static nvs_handle_t s_outboxNvsHandle = 0;
+static bool s_outboxSlotUsed[PERSISTENT_OUTBOX_CAPACITY] = {false};
+static uint64_t s_outboxSlotRecordId[PERSISTENT_OUTBOX_CAPACITY] = {0ULL};
+static uint16_t s_outboxCount = 0U;
+static uint32_t s_currentBootId = 0UL;
+static uint32_t s_nextRecordCounter = 1UL;
 
 static volatile bool s_mqttConnected = false;
 
@@ -92,6 +124,425 @@ static uint32_t s_crcFailureCount = 0UL;
 static uint32_t s_invalidLengthCount = 0UL;
 static uint32_t s_sequenceMismatchCount = 0UL;
 static uint32_t s_duplicateDataCount = 0UL;
+
+/**
+ * @brief  Builds the NVS key used by one persistent outbox slot.
+ * @param  slotIndex: Outbox slot index.
+ * @param  keyBuffer: Output buffer for the NVS key.
+ * @param  keyBufferSize: Size of keyBuffer.
+ * @retval true when the key was created successfully, otherwise false.
+ */
+static bool BuildOutboxSlotKey(uint16_t slotIndex,
+    char *keyBuffer,
+    size_t keyBufferSize)
+{
+    if ((keyBuffer == nullptr) ||
+        (keyBufferSize < 5U) ||
+        (slotIndex >= PERSISTENT_OUTBOX_CAPACITY))
+    {
+        return false;
+    }
+
+    snprintf(keyBuffer, keyBufferSize, "q%02u", (unsigned int)slotIndex);
+    return true;
+}
+
+/**
+ * @brief  Returns Unix time in milliseconds when the system clock is synchronized.
+ * @retval Unix timestamp in milliseconds, or 0 when the clock is not valid yet.
+ */
+static uint64_t GetUnixTimeMs(void)
+{
+    struct timeval currentTime = {};
+
+    if (gettimeofday(&currentTime, nullptr) != 0)
+    {
+        return 0ULL;
+    }
+
+    if ((int64_t)currentTime.tv_sec < MIN_VALID_UNIX_TIME_SECONDS)
+    {
+        return 0ULL;
+    }
+
+    return ((uint64_t)currentTime.tv_sec * 1000ULL) +
+        ((uint64_t)currentTime.tv_usec / 1000ULL);
+}
+
+/**
+ * @brief  Starts SNTP synchronization and waits briefly for a valid wall clock.
+ * @note   Failure to synchronize does not stop telemetry. The gateway falls back
+ *         to ageMs while the record remains in the current boot session.
+ * @retval true when a valid Unix clock is available, otherwise false.
+ */
+static bool InitializeSystemTime(void)
+{
+    configTime(0, 0, NTP_SERVER_PRIMARY, NTP_SERVER_SECONDARY);
+
+    const unsigned long startTimeMs = millis();
+
+    while ((millis() - startTimeMs) < TIME_SYNC_TIMEOUT_MS)
+    {
+        if (GetUnixTimeMs() != 0ULL)
+        {
+            Serial.println("System time synchronized");
+            return true;
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(200));
+    }
+
+    Serial.println("System time not synchronized; using uptime fallback");
+    return false;
+}
+
+/**
+ * @brief  Reads and validates one persistent telemetry record from NVS.
+ * @param  slotIndex: Outbox slot index.
+ * @param  record: Output record.
+ * @retval true when a valid record exists in the slot, otherwise false.
+ */
+static bool ReadPersistentRecord(uint16_t slotIndex,
+    PersistentTelemetryRecord &record)
+{
+    char slotKey[8];
+    size_t recordSize = sizeof(record);
+
+    if (!BuildOutboxSlotKey(slotIndex, slotKey, sizeof(slotKey)))
+    {
+        return false;
+    }
+
+    const esp_err_t result = nvs_get_blob(s_outboxNvsHandle,
+        slotKey,
+        &record,
+        &recordSize);
+
+    if (result != ESP_OK)
+    {
+        return false;
+    }
+
+    if ((recordSize != sizeof(record)) ||
+        (record.magic != PERSISTENT_RECORD_MAGIC) ||
+        (record.version != PERSISTENT_RECORD_VERSION))
+    {
+        return false;
+    }
+
+    return true;
+}
+
+/**
+ * @brief  Initializes the flash-backed telemetry outbox and restores queued records.
+ * @note   NVS records are individual atomic entries. A DATA frame is ACKed only
+ *         after its record has been committed successfully.
+ * @retval true when the outbox is ready, otherwise false.
+ */
+static bool InitializePersistentOutbox(void)
+{
+    esp_err_t result = nvs_flash_init();
+
+    if (result != ESP_OK)
+    {
+        Serial.printf("NVS init failed: %d\n", (int)result);
+        return false;
+    }
+
+    result = nvs_open(PERSISTENT_OUTBOX_NAMESPACE,
+        NVS_READWRITE,
+        &s_outboxNvsHandle);
+
+    if (result != ESP_OK)
+    {
+        Serial.printf("Outbox NVS open failed: %d\n", (int)result);
+        return false;
+    }
+
+    g_outboxMutex = xSemaphoreCreateMutex();
+
+    if (g_outboxMutex == nullptr)
+    {
+        Serial.println("Outbox mutex create failed");
+        return false;
+    }
+
+    uint32_t previousBootId = 0UL;
+    result = nvs_get_u32(s_outboxNvsHandle,
+        PERSISTENT_OUTBOX_BOOT_KEY,
+        &previousBootId);
+
+    if ((result != ESP_OK) && (result != ESP_ERR_NVS_NOT_FOUND))
+    {
+        Serial.printf("Outbox boot counter read failed: %d\n", (int)result);
+        return false;
+    }
+
+    s_currentBootId = previousBootId + 1UL;
+
+    if (s_currentBootId == 0UL)
+    {
+        s_currentBootId = 1UL;
+    }
+
+    result = nvs_set_u32(s_outboxNvsHandle,
+        PERSISTENT_OUTBOX_BOOT_KEY,
+        s_currentBootId);
+
+    if (result == ESP_OK)
+    {
+        result = nvs_commit(s_outboxNvsHandle);
+    }
+
+    if (result != ESP_OK)
+    {
+        Serial.printf("Outbox boot counter commit failed: %d\n", (int)result);
+        return false;
+    }
+
+    s_outboxCount = 0U;
+
+    for (uint16_t slotIndex = 0U;
+         slotIndex < PERSISTENT_OUTBOX_CAPACITY;
+         slotIndex++)
+    {
+        PersistentTelemetryRecord record = {};
+        char slotKey[8];
+        size_t recordSize = sizeof(record);
+
+        if (!BuildOutboxSlotKey(slotIndex, slotKey, sizeof(slotKey)))
+        {
+            return false;
+        }
+
+        result = nvs_get_blob(s_outboxNvsHandle,
+            slotKey,
+            &record,
+            &recordSize);
+
+        if (result == ESP_ERR_NVS_NOT_FOUND)
+        {
+            continue;
+        }
+
+        if (result != ESP_OK)
+        {
+            Serial.printf("Outbox slot %u read failed: %d\n",
+                (unsigned int)slotIndex,
+                (int)result);
+            return false;
+        }
+
+        if ((recordSize != sizeof(record)) ||
+            (record.magic != PERSISTENT_RECORD_MAGIC) ||
+            (record.version != PERSISTENT_RECORD_VERSION))
+        {
+            Serial.printf("Outbox slot %u is invalid; refusing silent data loss\n",
+                (unsigned int)slotIndex);
+            return false;
+        }
+
+        s_outboxSlotUsed[slotIndex] = true;
+        s_outboxSlotRecordId[slotIndex] = record.recordId;
+        s_outboxCount++;
+    }
+
+    Serial.printf("Persistent outbox ready: restored=%u capacity=%u boot=%lu\n",
+        (unsigned int)s_outboxCount,
+        (unsigned int)PERSISTENT_OUTBOX_CAPACITY,
+        (unsigned long)s_currentBootId);
+
+    return true;
+}
+
+/**
+ * @brief  Persists one telemetry record before acknowledging the STM32 node.
+ * @param  message: Telemetry message to store.
+ * @retval true when the NVS commit completed successfully, otherwise false.
+ */
+static bool PersistentOutboxPush(const TelemetryMessage &message)
+{
+    if (xSemaphoreTake(g_outboxMutex, portMAX_DELAY) != pdTRUE)
+    {
+        return false;
+    }
+
+    if (s_outboxCount >= PERSISTENT_OUTBOX_CAPACITY)
+    {
+        xSemaphoreGive(g_outboxMutex);
+        Serial.println("Persistent outbox full");
+        return false;
+    }
+
+    uint16_t freeSlot = PERSISTENT_OUTBOX_CAPACITY;
+
+    for (uint16_t slotIndex = 0U;
+         slotIndex < PERSISTENT_OUTBOX_CAPACITY;
+         slotIndex++)
+    {
+        if (!s_outboxSlotUsed[slotIndex])
+        {
+            freeSlot = slotIndex;
+            break;
+        }
+    }
+
+    if (freeSlot >= PERSISTENT_OUTBOX_CAPACITY)
+    {
+        xSemaphoreGive(g_outboxMutex);
+        return false;
+    }
+
+    PersistentTelemetryRecord record = {};
+    record.magic = PERSISTENT_RECORD_MAGIC;
+    record.version = PERSISTENT_RECORD_VERSION;
+    record.recordId = ((uint64_t)s_currentBootId << 32U) |
+        (uint64_t)s_nextRecordCounter++;
+    record.message = message;
+
+    char slotKey[8];
+    BuildOutboxSlotKey(freeSlot, slotKey, sizeof(slotKey));
+
+    esp_err_t result = nvs_set_blob(s_outboxNvsHandle,
+        slotKey,
+        &record,
+        sizeof(record));
+
+    if (result == ESP_OK)
+    {
+        result = nvs_commit(s_outboxNvsHandle);
+    }
+
+    if (result != ESP_OK)
+    {
+        Serial.printf("Outbox persist failed: %d\n", (int)result);
+        xSemaphoreGive(g_outboxMutex);
+        return false;
+    }
+
+    s_outboxSlotUsed[freeSlot] = true;
+    s_outboxSlotRecordId[freeSlot] = record.recordId;
+    s_outboxCount++;
+
+    LOGI("[OUTBOX+] id=%llu slot=%u count=%u\n",
+        (unsigned long long)record.recordId,
+        (unsigned int)freeSlot,
+        (unsigned int)s_outboxCount);
+
+    xSemaphoreGive(g_outboxMutex);
+    return true;
+}
+
+/**
+ * @brief  Returns the oldest durable telemetry record without removing it.
+ * @param  record: Output record.
+ * @retval true when a record is available, otherwise false.
+ */
+static bool PersistentOutboxPeek(PersistentTelemetryRecord &record)
+{
+    if (xSemaphoreTake(g_outboxMutex, portMAX_DELAY) != pdTRUE)
+    {
+        return false;
+    }
+
+    if (s_outboxCount == 0U)
+    {
+        xSemaphoreGive(g_outboxMutex);
+        return false;
+    }
+
+    uint16_t oldestSlot = PERSISTENT_OUTBOX_CAPACITY;
+    uint64_t oldestRecordId = UINT64_MAX;
+
+    for (uint16_t slotIndex = 0U;
+         slotIndex < PERSISTENT_OUTBOX_CAPACITY;
+         slotIndex++)
+    {
+        if (s_outboxSlotUsed[slotIndex] &&
+            (s_outboxSlotRecordId[slotIndex] < oldestRecordId))
+        {
+            oldestRecordId = s_outboxSlotRecordId[slotIndex];
+            oldestSlot = slotIndex;
+        }
+    }
+
+    const bool success = (oldestSlot < PERSISTENT_OUTBOX_CAPACITY) &&
+        ReadPersistentRecord(oldestSlot, record);
+
+    if (!success)
+    {
+        Serial.println("Persistent outbox head read failed");
+    }
+
+    xSemaphoreGive(g_outboxMutex);
+    return success;
+}
+
+/**
+ * @brief  Removes the oldest durable telemetry record after MQTT broker PUBACK.
+ * @param  expectedRecordId: Record ID that was acknowledged by the broker.
+ * @retval true when the record was durably removed, otherwise false.
+ */
+static bool PersistentOutboxPop(uint64_t expectedRecordId)
+{
+    if (xSemaphoreTake(g_outboxMutex, portMAX_DELAY) != pdTRUE)
+    {
+        return false;
+    }
+
+    uint16_t targetSlot = PERSISTENT_OUTBOX_CAPACITY;
+
+    for (uint16_t slotIndex = 0U;
+         slotIndex < PERSISTENT_OUTBOX_CAPACITY;
+         slotIndex++)
+    {
+        if (s_outboxSlotUsed[slotIndex] &&
+            (s_outboxSlotRecordId[slotIndex] == expectedRecordId))
+        {
+            targetSlot = slotIndex;
+            break;
+        }
+    }
+
+    if (targetSlot >= PERSISTENT_OUTBOX_CAPACITY)
+    {
+        xSemaphoreGive(g_outboxMutex);
+        return false;
+    }
+
+    char slotKey[8];
+    BuildOutboxSlotKey(targetSlot, slotKey, sizeof(slotKey));
+
+    esp_err_t result = nvs_erase_key(s_outboxNvsHandle, slotKey);
+
+    if (result == ESP_OK)
+    {
+        result = nvs_commit(s_outboxNvsHandle);
+    }
+
+    if (result != ESP_OK)
+    {
+        Serial.printf("Outbox remove failed: %d\n", (int)result);
+        xSemaphoreGive(g_outboxMutex);
+        return false;
+    }
+
+    s_outboxSlotUsed[targetSlot] = false;
+    s_outboxSlotRecordId[targetSlot] = 0ULL;
+
+    if (s_outboxCount > 0U)
+    {
+        s_outboxCount--;
+    }
+
+    LOGI("[OUTBOX-] id=%llu slot=%u count=%u\n",
+        (unsigned long long)expectedRecordId,
+        (unsigned int)targetSlot,
+        (unsigned int)s_outboxCount);
+
+    xSemaphoreGive(g_outboxMutex);
+    return true;
+}
 
 /**
  * @brief  Returns the MQTT node name associated with a LoRa node address.
@@ -514,16 +965,16 @@ static bool InitializeMqttClient(void)
 }
 
 /**
- * @brief  Enqueues one telemetry object for MQTT QoS 1 delivery.
+ * @brief  Enqueues one durable telemetry record for MQTT QoS 1 delivery.
  * @note   Topic format: iot/<node>/telemetry.
- * @note   Payload contains seq, temp, tempValid, status and ageMs in one JSON object.
- * @note   ageMs is the elapsed time since the DATA frame was accepted from the STM32 node.
- * @note   The message remains pending until MQTT_EVENT_PUBLISHED confirms broker PUBACK.
- * @param  message: Telemetry message to enqueue.
+ * @note   sampledAtMs is persisted when an absolute system clock is available.
+ * @note   ageMs remains a fallback for records captured and published in one boot.
+ * @param  record: Durable outbox record to publish.
  * @retval Positive MQTT message ID on success, or -1 on failure.
  */
-static int EnqueueTelemetryQos1(const TelemetryMessage &message)
+static int EnqueueTelemetryQos1(const PersistentTelemetryRecord &record)
 {
+    const TelemetryMessage &message = record.message;
     const char *nodeName = GetNodeName(message.address);
 
     if ((nodeName == nullptr) || (g_mqttClient == nullptr))
@@ -532,8 +983,49 @@ static int EnqueueTelemetryQos1(const TelemetryMessage &message)
     }
 
     char telemetryTopic[40];
-    char telemetryPayload[160];
-    const uint32_t sampleAgeMs = (uint32_t)(millis() - message.capturedAtMs);
+    char telemetryPayload[256];
+    char timestampText[32];
+    char ageText[24];
+
+    const bool recovered = message.bootId != s_currentBootId;
+    const uint64_t currentUnixMs = GetUnixTimeMs();
+    bool timestampValid = false;
+
+    if (message.sampledAtUnixMs != 0ULL)
+    {
+        snprintf(timestampText,
+            sizeof(timestampText),
+            "%llu",
+            (unsigned long long)message.sampledAtUnixMs);
+        timestampValid = true;
+
+        if ((currentUnixMs >= message.sampledAtUnixMs) &&
+            ((currentUnixMs - message.sampledAtUnixMs) <= 0xFFFFFFFFULL))
+        {
+            snprintf(ageText,
+                sizeof(ageText),
+                "%lu",
+                (unsigned long)(currentUnixMs - message.sampledAtUnixMs));
+        }
+        else
+        {
+            snprintf(ageText, sizeof(ageText), "null");
+        }
+    }
+    else if (!recovered)
+    {
+        snprintf(timestampText, sizeof(timestampText), "null");
+        snprintf(ageText,
+            sizeof(ageText),
+            "%lu",
+            (unsigned long)((uint32_t)(millis() - message.capturedAtMs)));
+        timestampValid = true;
+    }
+    else
+    {
+        snprintf(timestampText, sizeof(timestampText), "null");
+        snprintf(ageText, sizeof(ageText), "null");
+    }
 
     snprintf(telemetryTopic,
         sizeof(telemetryTopic),
@@ -544,10 +1036,16 @@ static int EnqueueTelemetryQos1(const TelemetryMessage &message)
     {
         snprintf(telemetryPayload,
             sizeof(telemetryPayload),
-            "{\"seq\":%u,\"temp\":null,\"tempValid\":false,\"status\":%u,\"ageMs\":%lu}",
+            "{\"id\":%llu,\"seq\":%u,\"temp\":null,\"tempValid\":false,"
+            "\"status\":%u,\"sampledAtMs\":%s,\"ageMs\":%s,"
+            "\"timestampValid\":%s,\"recovered\":%s}",
+            (unsigned long long)record.recordId,
             message.sequence,
             message.status,
-            (unsigned long)sampleAgeMs);
+            timestampText,
+            ageText,
+            timestampValid ? "true" : "false",
+            recovered ? "true" : "false");
     }
     else
     {
@@ -570,11 +1068,17 @@ static int EnqueueTelemetryQos1(const TelemetryMessage &message)
 
         snprintf(telemetryPayload,
             sizeof(telemetryPayload),
-            "{\"seq\":%u,\"temp\":%s,\"tempValid\":true,\"status\":%u,\"ageMs\":%lu}",
+            "{\"id\":%llu,\"seq\":%u,\"temp\":%s,\"tempValid\":true,"
+            "\"status\":%u,\"sampledAtMs\":%s,\"ageMs\":%s,"
+            "\"timestampValid\":%s,\"recovered\":%s}",
+            (unsigned long long)record.recordId,
             message.sequence,
             temperatureText,
             message.status,
-            (unsigned long)sampleAgeMs);
+            timestampText,
+            ageText,
+            timestampValid ? "true" : "false",
+            recovered ? "true" : "false");
     }
 
     const int mqttMessageId = esp_mqtt_client_enqueue(g_mqttClient,
@@ -587,8 +1091,9 @@ static int EnqueueTelemetryQos1(const TelemetryMessage &message)
 
     if (mqttMessageId >= 0)
     {
-        LOGI("[MQTT-QOS1-TX] %s seq=%u msg_id=%d payload=%s\n",
+        LOGI("[MQTT-QOS1-TX] %s id=%llu seq=%u msg_id=%d payload=%s\n",
             nodeName,
+            (unsigned long long)record.recordId,
             message.sequence,
             mqttMessageId,
             telemetryPayload);
@@ -598,35 +1103,30 @@ static int EnqueueTelemetryQos1(const TelemetryMessage &message)
 }
 
 /**
- * @brief  Pushes one decoded DATA packet to the telemetry queue.
+ * @brief  Persists one decoded DATA packet before sending the LoRa ACK.
  * @param  address: Node address.
+ * @param  sequence: LoRa transaction sequence number.
  * @param  temperatureCentiCelsius: Signed temperature multiplied by 100.
  * @param  status: Six-bit sensor fault mask.
  * @param  capturedAtMs: Gateway uptime timestamp when the DATA frame was accepted.
- * @retval 1 when queued successfully, otherwise 0.
+ * @retval true when the record is durably committed to NVS, otherwise false.
  */
-static bool EnqueueTelemetry(uint8_t address,
+static bool PersistTelemetry(uint8_t address,
     uint8_t sequence,
     int16_t temperatureCentiCelsius,
     uint8_t status,
     uint32_t capturedAtMs)
 {
-    TelemetryMessage message =
-    {
-        address,
-        sequence,
-        temperatureCentiCelsius,
-        status,
-        capturedAtMs
-    };
+    TelemetryMessage message = {};
+    message.address = address;
+    message.sequence = sequence;
+    message.temperatureCentiCelsius = temperatureCentiCelsius;
+    message.status = status;
+    message.capturedAtMs = capturedAtMs;
+    message.bootId = s_currentBootId;
+    message.sampledAtUnixMs = GetUnixTimeMs();
 
-    if (xQueueSend(g_telemetryQueue, &message, 0) != pdPASS)
-    {
-        Serial.println("Telemetry queue full");
-        return false;
-    }
-
-    return true;
+    return PersistentOutboxPush(message);
 }
 
 /**
@@ -675,8 +1175,8 @@ static void MqttTask(void *parameter)
 {
     (void)parameter;
 
-    TelemetryMessage pendingMessage;
-    bool hasPendingMessage = false;
+    PersistentTelemetryRecord pendingRecord = {};
+    bool hasPendingRecord = false;
     bool waitingForPubAck = false;
     int pendingMqttMessageId = -1;
     uint32_t enqueueFailureCount = 0UL;
@@ -687,23 +1187,21 @@ static void MqttTask(void *parameter)
     {
         EnsureWiFiConnected();
 
-        if (!hasPendingMessage)
+        if (!hasPendingRecord)
         {
-            if (xQueueReceive(g_telemetryQueue,
-                &pendingMessage,
-                0) == pdPASS)
+            if (PersistentOutboxPeek(pendingRecord))
             {
-                hasPendingMessage = true;
+                hasPendingRecord = true;
                 waitingForPubAck = false;
                 pendingMqttMessageId = -1;
             }
         }
 
-        if (hasPendingMessage &&
+        if (hasPendingRecord &&
             !waitingForPubAck &&
             s_mqttConnected)
         {
-            pendingMqttMessageId = EnqueueTelemetryQos1(pendingMessage);
+            pendingMqttMessageId = EnqueueTelemetryQos1(pendingRecord);
 
             if (pendingMqttMessageId >= 0)
             {
@@ -732,14 +1230,22 @@ static void MqttTask(void *parameter)
             {
                 if ((int)acknowledgedMessageId == pendingMqttMessageId)
                 {
+                    if (!PersistentOutboxPop(pendingRecord.recordId))
+                    {
+                        Serial.println("PUBACK received but durable outbox removal failed");
+                        vTaskDelay(pdMS_TO_TICKS(MQTT_ENQUEUE_RETRY_DELAY_MS));
+                        continue;
+                    }
+
                     pubAckCount++;
 
-                    LOGI("[MQTT-PUBACK] seq=%u msg_id=%d count=%lu\n",
-                        pendingMessage.sequence,
+                    LOGI("[MQTT-PUBACK] id=%llu seq=%u msg_id=%d count=%lu\n",
+                        (unsigned long long)pendingRecord.recordId,
+                        pendingRecord.message.sequence,
                         pendingMqttMessageId,
                         (unsigned long)pubAckCount);
 
-                    hasPendingMessage = false;
+                    hasPendingRecord = false;
                     waitingForPubAck = false;
                     pendingMqttMessageId = -1;
                     continue;
@@ -750,16 +1256,11 @@ static void MqttTask(void *parameter)
                     pendingMqttMessageId);
             }
 
-            /*
-             * ESP-MQTT normally keeps QoS 1 data in its internal outbox until PUBACK.
-             * If the outbox is empty for an extended period but this application has
-             * not observed PUBACK, allow the same telemetry object to be enqueued again.
-             */
             if (((millis() - mqttEnqueueTimeMs) >= MQTT_ACK_WATCHDOG_MS) &&
                 s_mqttConnected &&
                 (esp_mqtt_client_get_outbox_size(g_mqttClient) == 0))
             {
-                Serial.printf("MQTT PUBACK watchdog expired for msg_id=%d; requeueing\n",
+                Serial.printf("MQTT PUBACK watchdog expired for msg_id=%d; retrying durable record\n",
                     pendingMqttMessageId);
 
                 waitingForPubAck = false;
@@ -828,15 +1329,15 @@ static void LoraTask(void *parameter)
                 const uint8_t status = (uint8_t)(packet.data[2] & 0x3FU);
                 const uint32_t capturedAtMs = millis();
 
-                const bool queued = EnqueueTelemetry(currentNodeAddress,
+                const bool persisted = PersistTelemetry(currentNodeAddress,
                     currentSequence,
                     temperatureCentiCelsius,
                     status,
                     capturedAtMs);
 
-                if (!queued)
+                if (!persisted)
                 {
-                    LOGI("[QUEUE] node=%02X seq=%u full, DATA not ACKed\n",
+                    LOGI("[OUTBOX] node=%02X seq=%u persist failed/full, DATA not ACKed\n",
                         currentNodeAddress,
                         currentSequence);
                     continue;
@@ -887,7 +1388,7 @@ static void LoraTask(void *parameter)
 }
 
 /**
- * @brief  Initializes LoRa, MQTT queue and FreeRTOS tasks.
+ * @brief  Initializes LoRa, persistent telemetry outbox and FreeRTOS tasks.
  * @retval None
  */
 void setup(void)
@@ -916,12 +1417,12 @@ void setup(void)
 
     WiFi.mode(WIFI_STA);
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    EnsureWiFiConnected();
+    InitializeSystemTime();
 
-    g_telemetryQueue = xQueueCreate(TELEMETRY_QUEUE_LENGTH, sizeof(TelemetryMessage));
-
-    if (g_telemetryQueue == nullptr)
+    if (!InitializePersistentOutbox())
     {
-        Serial.println("Queue create failed");
+        Serial.println("Persistent outbox initialization failed");
 
         while (1)
         {
@@ -955,7 +1456,7 @@ void setup(void)
         nullptr,
         0);
 
-    Serial.println("Gateway ready (protocol v4: MQTT QoS 1 + broker PUBACK)");
+    Serial.println("Gateway ready (protocol v5: durable NVS outbox + MQTT QoS 1)");
 }
 
 /**
