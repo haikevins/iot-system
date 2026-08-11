@@ -91,7 +91,6 @@ const writeApi = influxDB.getWriteApi(
     batchSize: 2,
     flushInterval: 0,
     maxRetries: 0,
-    maxRetryTime: 0,
     maxBufferLines: 128
   }
 );
@@ -822,116 +821,133 @@ app.get('/latest', (_request, response) => {
   response.json(latestByNode);
 });
 
-app.get('/history', async (request, response) => {
-  const rangeMinutes = clampInteger(request.query.minutes, 15, 1, 1440);
-  const windowSeconds = clampInteger(request.query.window, 5, 1, 300);
-  const bucket = escapeFluxString(config.influxBucket);
-
-  const temperatureQuery = `
-from(bucket: "${bucket}")
-  |> range(start: -${rangeMinutes}m)
-  |> filter(fn: (row) => row._measurement == "node_metrics")
-  |> filter(fn: (row) => row._field == "temp_avg")
-  |> aggregateWindow(every: ${windowSeconds}s, fn: last, createEmpty: false)
-  |> keep(columns: ["_time", "node", "_value"])
-  |> sort(columns: ["_time"])
-`;
-
-  const validityQuery = `
-from(bucket: "${bucket}")
-  |> range(start: -${rangeMinutes}m)
-  |> filter(fn: (row) => row._measurement == "node_metrics")
-  |> filter(fn: (row) => row._field == "temp_valid")
-  |> aggregateWindow(every: ${windowSeconds}s, fn: last, createEmpty: false)
-  |> keep(columns: ["_time", "node", "_value"])
-  |> sort(columns: ["_time"])
-`;
-
-  try {
-    const [temperatureRows, validityRows] = await Promise.all([
-      queryApi.collectRows(temperatureQuery),
-      queryApi.collectRows(validityQuery)
-    ]);
-
-    const valuesByTimeAndNode = new Map();
-
-    function getEntry(time, node) {
-      const key = `${time}|${node}`;
-
-      if (!valuesByTimeAndNode.has(key)) {
-        valuesByTimeAndNode.set(key, {
-          time,
-          node,
-          temperature: null,
-          hasTemperature: false,
-          temperatureValid: null
-        });
-      }
-
-      return valuesByTimeAndNode.get(key);
-    }
-
-    for (const row of temperatureRows) {
-      const node = String(row.node || '').toLowerCase();
-      const time = row._time;
-      const value = Number(row._value);
-
-      if (!/^node\d{2}$/.test(node) || !time || !Number.isFinite(value)) {
-        continue;
-      }
-
-      const entry = getEntry(time, node);
-      entry.temperature = value;
-      entry.hasTemperature = true;
-    }
-
-    for (const row of validityRows) {
-      const node = String(row.node || '').toLowerCase();
-      const time = row._time;
-
-      if (!/^node\d{2}$/.test(node) || !time) {
-        continue;
-      }
-
-      const entry = getEntry(time, node);
-      entry.temperatureValid = row._value === true;
-    }
-
-    const pointsByTime = new Map();
-
-    for (const entry of valuesByTimeAndNode.values()) {
-      if (!pointsByTime.has(entry.time)) {
-        pointsByTime.set(entry.time, { time: entry.time });
-      }
-
-      const point = pointsByTime.get(entry.time);
-
-      /*
-       * Legacy points may not contain temp_valid. In that case, a real
-       * temp_avg value is treated as valid. New invalid telemetry always
-       * writes temp_valid=false, which creates an explicit null/gap.
-       */
-      const isValid =
-        entry.temperatureValid === false
-          ? false
-          : entry.hasTemperature;
-
-      point[entry.node] = isValid ? entry.temperature : null;
-    }
-
-    const points = Array.from(pointsByTime.values()).sort((left, right) =>
-      left.time.localeCompare(right.time)
+app.get('/history', async (request, response) =>
+{
+    const rangeMinutes = clampInteger(
+        request.query.minutes,
+        15,
+        1,
+        1440
     );
 
-    response.json({
-      rangeMinutes,
-      windowSeconds,
-      points
-    });
-  } catch (error) {
-    console.error('Influx history query failed:', error.message);
-    response.status(500).json({ error: 'Unable to query temperature history' });
-  }
+    const windowSeconds = clampInteger(
+        request.query.window,
+        5,
+        1,
+        300
+    );
+
+    const bucket = escapeFluxString(config.influxBucket);
+
+const query = `
+from(bucket: "${bucket}")
+    |> range(start: -${rangeMinutes}m)
+    |> filter(fn: (r) =>
+        r._measurement == "node_metrics"
+    )
+    |> filter(fn: (r) =>
+        r._field == "temp_avg" or
+        r._field == "temp_valid"
+    )
+    |> aggregateWindow(
+        every: ${windowSeconds}s,
+        fn: last,
+        createEmpty: false
+    )
+    |> pivot(
+        rowKey: ["_time", "node"],
+        columnKey: ["_field"],
+        valueColumn: "_value"
+    )
+    |> keep(
+        columns: [
+            "_time",
+            "node",
+            "temp_avg",
+            "temp_valid"
+        ]
+    )
+    |> sort(columns: ["_time"])
+`;
+
+    try
+    {
+        const rows = await queryApi.collectRows(query);
+
+        const pointsByTime = new Map();
+
+        for (const row of rows)
+        {
+            const node = String(row.node || '').toLowerCase();
+            const time = row._time;
+
+            if (!/^node0[1-3]$/.test(node) || !time)
+            {
+                continue;
+            }
+
+            if (!pointsByTime.has(time))
+            {
+                pointsByTime.set(
+                    time,
+                    {
+                        time,
+                        node01: null,
+                        node02: null,
+                        node03: null
+                    }
+                );
+            }
+
+            const point = pointsByTime.get(time);
+
+            const temperature = Number(row.temp_avg);
+
+            /*
+             * Legacy data có thể chưa có temp_valid.
+             * Nếu có temp_avg hợp lệ thì vẫn hiển thị.
+             */
+            const temperatureValid =
+                row.temp_valid === false
+                    ? false
+                    : Number.isFinite(temperature);
+
+            point[node] =
+                temperatureValid &&
+                Number.isFinite(temperature)
+                    ? temperature
+                    : null;
+        }
+
+        const points = Array
+            .from(pointsByTime.values())
+            .sort((left, right) =>
+            {
+                return left.time.localeCompare(right.time);
+            });
+
+        response.json(
+            {
+                rangeMinutes,
+                windowSeconds,
+                points
+            }
+        );
+    }
+    catch (error)
+    {
+        console.error(
+            'Influx history query failed:',
+            error
+        );
+
+        response.status(500).json(
+            {
+                error: 'Unable to query temperature history',
+                detail: error.message
+            }
+        );
+    }
 });
 
 const server = app.listen(config.port, config.host, () => {

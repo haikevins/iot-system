@@ -14,12 +14,10 @@ import {
   Activity,
   AlertTriangle,
   BarChart3,
-  CalendarDays,
   CircleHelp,
   Cpu,
   LayoutDashboard,
   LogOut,
-  SlidersHorizontal,
   Server,
   Settings,
   Thermometer,
@@ -48,9 +46,7 @@ const NODE_COLORS = {
   node03: '#1e6a4c'
 };
 const MAIN_MENU_ITEMS = [
-  { label: 'Dashboard', icon: LayoutDashboard },
-  { label: 'Control', icon: SlidersHorizontal },
-  { label: 'Calendar', icon: CalendarDays }
+  { label: 'Dashboard', icon: LayoutDashboard }
 ];
 const GENERAL_MENU_ITEMS = [
   { label: 'Settings', icon: Settings },
@@ -58,13 +54,6 @@ const GENERAL_MENU_ITEMS = [
   { label: 'Logout', icon: LogOut }
 ];
 
-const WEEK_DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-const MAINTENANCE_TEMPLATE = [
-  { node: 'node01', day: 5, note: 'Ve sinh dieu hoa' },
-  { node: 'node02', day: 12, note: 'Kiem tra gas' },
-  { node: 'node03', day: 19, note: 'Hieu chuan cam bien' },
-  { node: 'node01', day: 26, note: 'Kiem tra cam bien' }
-];
 
 function decodeSensorBits(statusByte) {
   if (!Number.isInteger(statusByte)) {
@@ -124,12 +113,6 @@ function formatNodeName(nodeId) {
   return nodeId.replace('node', 'Node ');
 }
 
-function formatDateKey(date) {
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, '0');
-  const day = String(date.getDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
-}
 
 function isNodeOnline(lastSeenAt, nowMs) {
   if (!lastSeenAt) return false;
@@ -227,17 +210,6 @@ function App() {
   const [search, setSearch] = useState('');
   const [activeMenu, setActiveMenu] = useState('Dashboard');
   const [nowTick, setNowTick] = useState(Date.now());
-  const [acStates, setAcStates] = useState([false, false, false]);
-  const [controlMode, setControlMode] = useState('auto');
-
-  const acControls = useMemo(
-    () => [
-      { id: 'ac-1', label: 'Điều hòa 1' },
-      { id: 'ac-2', label: 'Điều hòa 2' },
-      { id: 'ac-3', label: 'Điều hòa 3' }
-    ],
-    []
-  );
 
   useEffect(() => {
     let active = true;
@@ -415,48 +387,6 @@ function App() {
   const ActiveMenuIcon =
     [...MAIN_MENU_ITEMS, ...GENERAL_MENU_ITEMS].find((item) => item.label === activeMenu)?.icon ??
     LayoutDashboard;
-  const now = useMemo(() => new Date(nowTick), [nowTick]);
-  const currentYear = now.getFullYear();
-  const currentMonth = now.getMonth();
-  const monthLabel = now.toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
-  const todayLabel = now.toLocaleDateString('en-GB', {
-    weekday: 'long',
-    day: '2-digit',
-    month: 'short',
-    year: 'numeric'
-  });
-  const todayKey = formatDateKey(now);
-  const daysInMonth = new Date(currentYear, currentMonth + 1, 0).getDate();
-  const firstDayIndex = (new Date(currentYear, currentMonth, 1).getDay() + 6) % 7;
-  const calendarCells = useMemo(() => {
-    const cells = Array.from({ length: firstDayIndex }, () => null);
-    for (let day = 1; day <= daysInMonth; day += 1) {
-      cells.push(day);
-    }
-    return cells;
-  }, [firstDayIndex, daysInMonth]);
-  const maintenanceSchedule = useMemo(() => {
-    return MAINTENANCE_TEMPLATE.map((item) => {
-      const date = new Date(currentYear, currentMonth, item.day);
-      return {
-        ...item,
-        date: formatDateKey(date)
-      };
-    }).sort((a, b) => a.date.localeCompare(b.date));
-  }, [currentYear, currentMonth]);
-  const maintenanceByDate = useMemo(() => {
-    return maintenanceSchedule.reduce((acc, item) => {
-      if (!acc[item.date]) {
-        acc[item.date] = [];
-      }
-      acc[item.date].push(item);
-      return acc;
-    }, {});
-  }, [maintenanceSchedule]);
-
-  const toggleAc = (index) => {
-    setAcStates((prev) => prev.map((value, idx) => (idx === index ? !value : value)));
-  };
 
   return (
     <div className="layout-shell">
@@ -773,139 +703,6 @@ function App() {
                 </article>
               </section>
             </>
-          ) : activeMenu === 'Control' ? (
-            <section className="control-grid">
-              <article className="panel control-panel">
-                <div className="panel-head">
-                  <h2 className="panel-title-with-icon">
-                    <SlidersHorizontal size={17} strokeWidth={2} />
-                    <span>Control</span>
-                  </h2>
-                </div>
-                <div className="control-list">
-                  {acControls.map((item, index) => {
-                    const isOn = acStates[index];
-                    return (
-                      <div className={`control-row ${isOn ? 'on' : 'off'}`} key={item.id}>
-                        <div className="row-left">
-                          <span className={`control-dot ${isOn ? 'on' : 'off'}`} />
-                          <strong>{item.label}</strong>
-                        </div>
-                        <button
-                          type="button"
-                          className={`toggle-btn ${isOn ? 'on' : 'off'}`}
-                          onClick={() => toggleAc(index)}
-                        >
-                          {isOn ? 'ON' : 'OFF'}
-                        </button>
-                      </div>
-                    );
-                  })}
-                  <div className="control-row mode-row">
-                    <div className="row-left">
-                      <span className={`control-dot ${controlMode === 'auto' ? 'on' : 'off'}`} />
-                      <strong>Mode</strong>
-                    </div>
-                    <div className="mode-switch">
-                      <button
-                        type="button"
-                        className={`mode-btn ${controlMode === 'auto' ? 'active' : ''}`}
-                        onClick={() => setControlMode('auto')}
-                      >
-                        Auto
-                      </button>
-                      <button
-                        type="button"
-                        className={`mode-btn ${controlMode === 'manual' ? 'active' : ''}`}
-                        onClick={() => setControlMode('manual')}
-                      >
-                        Manual
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              </article>
-            </section>
-          ) : activeMenu === 'Calendar' ? (
-            <section className="calendar-layout">
-              <article className="panel calendar-panel">
-                <div className="panel-head">
-                  <h2 className="panel-title-with-icon">
-                    <CalendarDays size={17} strokeWidth={2} />
-                    <span>Maintenance Calendar</span>
-                  </h2>
-                  <div className="calendar-now">
-                    <span className="calendar-month">{monthLabel}</span>
-                    <span className="calendar-time">{todayLabel}</span>
-                    <span className="calendar-time">{now.toLocaleTimeString('en-GB', { hour12: false })}</span>
-                  </div>
-                </div>
-                <div className="calendar-grid">
-                  {WEEK_DAYS.map((day) => (
-                    <div key={day} className="calendar-weekday">
-                      {day}
-                    </div>
-                  ))}
-                  {calendarCells.map((day, index) => {
-                    if (!day) {
-                      return <div key={`empty-${index}`} className="calendar-cell empty" />;
-                    }
-                    const date = new Date(currentYear, currentMonth, day);
-                    const dateKey = formatDateKey(date);
-                    const events = maintenanceByDate[dateKey] || [];
-                    const isToday = dateKey === todayKey;
-                    return (
-                      <div
-                        key={dateKey}
-                        className={`calendar-cell${isToday ? ' today' : ''}${events.length ? ' has-event' : ''}`}
-                      >
-                        <span className="calendar-day">{day}</span>
-                        <div className="calendar-dots">
-                          {events.map((event, idx) => (
-                            <span
-                              key={`${event.node}-${idx}`}
-                              className="calendar-dot"
-                              style={{ backgroundColor: NODE_COLORS[event.node] || '#0f8b5f' }}
-                            />
-                          ))}
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              </article>
-              <article className="panel calendar-notes">
-                <div className="panel-head">
-                  <h2 className="panel-title-with-icon">
-                    <Thermometer size={17} strokeWidth={2} />
-                    <span>Maintenance Notes</span>
-                  </h2>
-                </div>
-                <div className="maintenance-list">
-                  {maintenanceSchedule.map((item) => {
-                    const isToday = item.date === todayKey;
-                    const nodeColor = NODE_COLORS[item.node] || '#0f8b5f';
-                    return (
-                      <div
-                        key={`${item.node}-${item.date}`}
-                        className={`maintenance-item${isToday ? ' today' : ''}`}
-                      >
-                        <div>
-                          <div className="maintenance-note">{item.note}</div>
-                          <div className="maintenance-date">{item.date}</div>
-                        </div>
-                        <span
-                          className="node-pill"
-                          style={{ backgroundColor: `${nodeColor}22`, color: nodeColor }}
-                        >
-                          {formatNodeName(item.node)}
-                        </span>
-                      </div>
-                    );
-                  })}
-                </div>
-              </article>
-            </section>
           ) : (
             <section className="placeholder-panel">
               <div>
