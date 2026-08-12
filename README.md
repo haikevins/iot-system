@@ -45,9 +45,9 @@ The system monitors six temperature channels on each of three remote sensor node
 
 ```text
 Node 01 ─┐
-Node 02 ─┼─ LoRa 433 MHz ─→ ESP32 Gateway ─→ MQTT ─→ Backend ─→ InfluxDB
+Node 02 ─┼─ LoRa 433 MHz ─ ESP32 Gateway ─ MQTT ─ Backend ─ InfluxDB
 Node 03 ─┘                                                   │
-                                                             └─→ REST API ─→ React Dashboard
+                                                             └─ REST API ─ React Dashboard
 ```
 
 The project is intentionally split into independent layers:
