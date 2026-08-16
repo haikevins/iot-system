@@ -1,6 +1,6 @@
 # IoT System
 
-> An end-to-end embedded IoT temperature-monitoring system built around three STM32 sensor nodes, an ESP32 LoRa gateway, a persistent MQTT transport layer, a durable Node.js ingestion backend, InfluxDB time-series storage, and a responsive React dashboard.
+An end-to-end embedded IoT temperature-monitoring system built around three STM32 sensor nodes, an ESP32 LoRa gateway, a persistent MQTT transport layer, a durable Node.js ingestion backend, InfluxDB time-series storage, and a responsive React dashboard.
 
 The project is designed as more than a basic sensor demo. Its main focus is **reliable data delivery across multiple failure boundaries**: LoRa retries, gateway-side flash persistence, MQTT QoS 1, broker persistence, backend disk spooling, timestamp reconstruction, detailed sensor diagnostics, and historical visualization.
 
