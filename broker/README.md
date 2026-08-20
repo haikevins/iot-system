@@ -57,11 +57,12 @@ sequenceDiagram
     participant M as Mosquitto
     participant B as Backend
     G->>M: PUBLISH QoS 1
-    M-->>G: PUBACK after broker accepts ownership
+    M-->>G: PUBACK
     M->>B: PUBLISH QoS 1
-    Note over M,B: Persistent session allows queued delivery across reconnects
-    B-->>M: PUBACK after backend durable spool
+    B-->>M: PUBACK
 ```
+
+With the backend using a persistent MQTT session (`clean = false`), Mosquitto can retain matching QoS traffic while the backend is temporarily disconnected and deliver it after the session reconnects. Broker persistence extends this reliability across broker restarts when the configured persistence state is successfully written and restored.
 
 
 The full chain is:
