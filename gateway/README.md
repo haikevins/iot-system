@@ -351,18 +351,28 @@ The MQTT layer can serialize these as `null` rather than pretending that `0 dBm`
 
 ## Persist-Before-ACK
 
+**LoRa acceptance path**
+
 ```mermaid
 sequenceDiagram
     participant N as STM32 Node
     participant L as LoraTask
     participant F as LittleFS Outbox
-    participant M as MqttTask
-    participant B as Broker
     N->>L: DATA(seq)
-    L->>F: Write temp file + flush + rename + verify
-    F-->>L: Commit valid
+    L->>F: Persist temp file + rename + verify
+    F-->>L: Durable record committed
     L-->>N: ACK(seq)
+```
+
+**MQTT drain path**
+
+```mermaid
+sequenceDiagram
+    participant M as MqttTask
+    participant F as LittleFS Outbox
+    participant B as Broker
     M->>F: Peek oldest record
+    F-->>M: Persistent telemetry record
     M->>B: PUBLISH QoS 1
     B-->>M: PUBACK(msg_id)
     M->>F: Pop record

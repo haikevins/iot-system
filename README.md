@@ -174,49 +174,62 @@ Each first-party subsystem has a dedicated README that documents the implementat
 | Frontend | [frontend/README.md](frontend/README.md) | React dashboard, freshness logic, faults, history and UI settings |
 
 ```mermaid
-flowchart LR
-    N1["Node 01"] --> G["Gateway"]
-    N2["Node 02"] --> G
-    N3["Node 03"] --> G
+flowchart TB
+    NODES["STM32 sensing nodes<br/>Node 01 · Node 02 · Node 03"] --> G["ESP32 Gateway"]
     G --> M["Mosquitto"]
-    M --> B["Backend"]
+    M --> B["Node.js Backend"]
     B --> I["InfluxDB"]
-    B --> F["Frontend"]
+    B --> F["React Frontend"]
 ```
 
 ---
 
 ## System Architecture
 
-```mermaid
-flowchart LR
-    N1["STM32 Node 01<br/>6 × NTC<br/>ADC1 + DMA"] -->|LoRa 433 MHz| GW
-    N2["STM32 Node 02<br/>6 × NTC<br/>ADC1 + DMA"] -->|LoRa 433 MHz| GW
-    N3["STM32 Node 03<br/>6 × NTC<br/>MCP3208"] -->|LoRa 433 MHz| GW
+**Sensing and LoRa transport**
 
-    GW["ESP32 Gateway<br/>LittleFS Outbox<br/>RSSI + Timestamp"] -->|MQTT QoS 1| MQ["Mosquitto<br/>Persistent Broker"]
-    MQ --> BE["Node.js Backend<br/>Durable Disk Outbox"]
-    BE --> DB["InfluxDB<br/>Time-Series Database"]
+```mermaid
+flowchart TB
+    N1["Node 01<br/>6 × NTC · ADC1 + DMA"] -->|"LoRa 433 MHz"| GW["ESP32 Gateway<br/>LittleFS Outbox"]
+    N2["Node 02<br/>6 × NTC · ADC1 + DMA"] -->|"LoRa 433 MHz"| GW
+    N3["Node 03<br/>6 × NTC · MCP3208"] -->|"LoRa 433 MHz"| GW
+    GW -->|"MQTT QoS 1"| MQ["Mosquitto"]
+```
+
+**Backend, storage and presentation**
+
+```mermaid
+flowchart TB
+    MQ["Mosquitto"] --> BE["Node.js Backend<br/>Durable Disk Outbox"]
+    BE --> DB["InfluxDB"]
     BE --> API["REST API"]
     API --> FE["React / Vite Dashboard"]
-    DB --> BE
 ```
 
 ### Reliability chain
+
+**Node to broker**
 
 ```mermaid
 sequenceDiagram
     participant N as STM32 Node
     participant G as ESP32 Gateway
     participant M as Mosquitto
-    participant B as Backend
-    participant I as InfluxDB
     N->>G: DATA(seq, temp, faults, age)
     G->>G: Commit + verify LittleFS record
-    G-->>N: ACK only after durable commit
+    G-->>N: ACK after durable commit
     G->>M: PUBLISH QoS 1
     M-->>G: PUBACK
     G->>G: Remove LittleFS record
+```
+
+**Broker to durable backend storage**
+
+```mermaid
+sequenceDiagram
+    participant M as Mosquitto
+    participant B as Backend
+    participant I as InfluxDB
     M->>B: Deliver QoS 1 telemetry
     B->>B: Atomic write + fsync pending record
     B-->>M: Allow PUBACK after durable spool

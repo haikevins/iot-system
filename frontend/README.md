@@ -24,15 +24,23 @@
 
 ## Overview
 
+**Live status path**
+
 ```mermaid
-flowchart LR
+flowchart TB
     API["Backend REST API"] --> L["/latest + /health"]
-    API --> H["/history"]
-    L --> S["React state"]
-    H --> C["Recharts history state"]
+    L --> S["React live state"]
     S --> D["Node cards + health + alerts"]
-    C --> D
     U["localStorage UI settings"] --> D
+```
+
+**History path**
+
+```mermaid
+flowchart TB
+    API["Backend REST API"] --> H["/history"]
+    H --> C["Recharts history state"]
+    C --> CHART["History chart"]
 ```
 
 

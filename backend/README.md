@@ -26,7 +26,7 @@
 The backend sits between the MQTT broker, InfluxDB and the frontend.
 
 ```mermaid
-flowchart LR
+flowchart TB
     MQ["Mosquitto<br/>QoS 1"] --> BE["Backend<br/>Node.js / Express"]
     BE --> DISK["Durable Outbox<br/>pending / done / rejected"]
     DISK --> DB["InfluxDB"]
@@ -225,17 +225,29 @@ Never commit `.env`.
 
 ## MQTT Session Design
 
+**Durable MQTT acceptance**
+
 ```mermaid
 sequenceDiagram
     participant M as Mosquitto
     participant B as MQTT.js Backend
     participant D as Disk Outbox
-    participant I as InfluxDB
     M->>B: PUBLISH QoS 1
     B->>B: Parse + validate
-    B->>D: temp write → fsync → rename → dir fsync
-    D-->>B: Durable pending record
+    B->>D: Atomic pending-record write
+    D-->>B: fsync + rename + directory fsync complete
     B-->>M: handleMessage callback → PUBACK
+```
+
+**InfluxDB drain**
+
+```mermaid
+sequenceDiagram
+    participant B as Backend Worker
+    participant D as Disk Outbox
+    participant I as InfluxDB
+    B->>D: Read pending record
+    D-->>B: Normalized telemetry
     B->>I: writePoint + flush
     I-->>B: Success
     B->>D: pending → done
