@@ -2,35 +2,39 @@
 
 > Responsive React monitoring dashboard for live STM32 node telemetry, temperature history, LoRa RSSI, sensor diagnostics, freshness, alerts and system health.
 
-***
+[← Backend](../backend/README.md) · [↑ Root README](../README.md)
+
+---
 
 ## Table of Contents
 
-1. [Overview](#overview)
-2. [Technology Stack](#technology-stack)
-3. [Application Structure](#application-structure)
-4. [Configuration](#configuration)
-5. [Dashboard](#dashboard)
-6. [Search and Filters](#search-and-filters)
-7. [Temperature Chart](#temperature-chart)
-8. [Node Cards](#node-cards)
-9. [Sensor Diagnostics](#sensor-diagnostics)
-10. [System Health and Alerts](#system-health-and-alerts)
-11. [Settings](#settings)
-12. [Help Page](#help-page)
-13. [Light and Dark Themes](#light-and-dark-themes)
-14. [Responsive Design](#responsive-design)
-15. [API Integration](#api-integration)
-16. [Loading and Error States](#loading-and-error-states)
-17. [Development](#development)
-18. [Production Build](#production-build)
-19. [Troubleshooting](#troubleshooting)
-20. [Known Limitations](#known-limitations)
-21. [Future Improvements](#future-improvements)
+- [Overview](#overview)
+- [Technology and Application Structure](#technology-stack)
+- [Configuration](#configuration)
+- [Dashboard and Node State](#dashboard)
+- [Temperature History](#temperature-chart)
+- [Sensor Diagnostics](#sensor-diagnostics)
+- [System Health, Alerts and Settings](#system-health-and-alerts)
+- [API Integration](#api-integration)
+- [Development and Production Build](#development)
+- [Troubleshooting and Limitations](#troubleshooting)
+- [References](#references)
 
 ***
 
 ## Overview
+
+```mermaid
+flowchart LR
+    API["Backend REST API"] --> L["/latest + /health"]
+    API --> H["/history"]
+    L --> S["React state"]
+    H --> C["Recharts history state"]
+    S --> D["Node cards + health + alerts"]
+    C --> D
+    U["localStorage UI settings"] --> D
+```
+
 
 The frontend is the operator-facing layer of the IoT System.
 
@@ -64,7 +68,7 @@ Logout
 
 `Dashboard`, `Settings` and `Help` contain real application content. The project does not currently implement a complete user-authentication/logout backend.
 
-***
+---
 
 ## Technology Stack
 
@@ -91,7 +95,7 @@ Current package scripts:
 }
 ```
 
-***
+---
 
 ## Application Structure
 
@@ -128,7 +132,7 @@ For a larger application, future refactoring should split:
 
 into dedicated modules.
 
-***
+---
 
 ## Configuration
 
@@ -178,7 +182,7 @@ then:
 npm run dev -- --host 0.0.0.0
 ```
 
-***
+---
 
 ## Dashboard
 
@@ -231,7 +235,7 @@ The cards aggregate current backend state:
 
 Invalid temperature samples are excluded instead of being treated as `0 °C`.
 
-***
+---
 
 ## Search and Filters
 
@@ -266,7 +270,7 @@ The filtered node list drives:
 
 A result counter communicates how many nodes match.
 
-***
+---
 
 ## Temperature Chart
 
@@ -344,7 +348,7 @@ for visible/available series.
 
 Temperature decimal precision is configurable in Settings.
 
-***
+---
 
 ## Node Cards
 
@@ -414,7 +418,7 @@ Default:
 
 The threshold can be changed in Settings.
 
-***
+---
 
 ## Sensor Diagnostics
 
@@ -462,7 +466,7 @@ The UI distinguishes:
 
 A radio-online node can still contain a bad sensor. These are separate concepts.
 
-***
+---
 
 ## System Health and Alerts
 
@@ -506,7 +510,7 @@ Last update: just now
 
 This is more useful than merely showing “Gateway Online”, because it tells the operator whether the browser is receiving fresh backend state.
 
-***
+---
 
 ## Settings
 
@@ -631,7 +635,7 @@ Representative defaults:
 
 The environment-based offline value can be used as the initial default.
 
-***
+---
 
 ## Help Page
 
@@ -662,7 +666,7 @@ Dashboard
 
 The page is styled for both light and dark themes.
 
-***
+---
 
 ## Light and Dark Themes
 
@@ -709,7 +713,7 @@ sans-serif
 
 The application does not require shipping proprietary font files.
 
-***
+---
 
 ## Responsive Design
 
@@ -730,7 +734,7 @@ Mobile:
 
 The goal is to keep the same monitoring features available on a phone rather than building a separate mobile application.
 
-***
+---
 
 ## API Integration
 
@@ -740,14 +744,15 @@ Frontend endpoint base:
 VITE_API_BASE_URL
 ```
 
-Main requests:
+Runtime polling requests:
 
 ```text
 GET /latest
-GET /history
 GET /health
-GET /ingest-status
+GET /history?minutes=<range>&window=<seconds>
 ```
+
+`GET /ingest-status` is shown on the Help page as an operator diagnostic command. `App.jsx` does not poll it during normal dashboard operation.
 
 ### `/latest`
 
@@ -771,7 +776,7 @@ Used for backend system state.
 
 Used to infer database ingestion health and expose server-side reliability state.
 
-***
+---
 
 ## Loading and Error States
 
@@ -801,7 +806,7 @@ If no nodes match:
 No nodes match the current search/filter.
 ```
 
-***
+---
 
 ## Development
 
@@ -842,7 +847,7 @@ Lint:
 npm run lint
 ```
 
-***
+---
 
 ## Production Build
 
@@ -866,7 +871,7 @@ npm run preview -- --host 0.0.0.0
 
 A Vite warning about a JavaScript chunk above the default size threshold is not itself a build failure. Future code splitting can reduce bundle size.
 
-***
+---
 
 ## Troubleshooting
 
@@ -957,7 +962,7 @@ New telemetry should include `rssiDbm`.
 
 Old records created before RSSI support can legitimately have no RSSI.
 
-***
+---
 
 ## Known Limitations
 
@@ -970,7 +975,7 @@ Old records created before RSSI support can legitimately have no RSSI.
 - Long historical ranges rely on server-side aggregation rather than frontend virtualized datasets.
 - Dashboard background imagery is aesthetic and may be removed for industrial deployments requiring maximum contrast.
 
-***
+---
 
 ## Future Improvements
 
@@ -994,3 +999,17 @@ Old records created before RSSI support can legitimately have no RSSI.
 18. Add production PWA/offline shell if useful.
 19. Add configurable dashboard layouts.
 20. Add localization.
+
+---
+
+## References
+
+- [React](https://react.dev/)
+- [React — useEffect](https://react.dev/reference/react/useEffect)
+- [Vite — Environment Variables and Modes](https://vite.dev/guide/env-and-mode)
+- [Recharts — LineChart](https://recharts.github.io/en-US/api/LineChart/)
+- [Lucide React](https://lucide.dev/guide/packages/lucide-react)
+
+---
+
+[← Backend](../backend/README.md) · [↑ Root README](../README.md)

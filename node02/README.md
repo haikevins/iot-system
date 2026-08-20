@@ -2,47 +2,41 @@
 
 > STM32F103 LoRa temperature node at address `0x02`, responsible for acquiring six NTC channels through STM32 ADC1 + DMA, applying filtering and diagnostics, and responding reliably to gateway POLL transactions.
 
-***
+[← Node 01](../node01/README.md) · [↑ Root README](../README.md) · [Next: Node 03 →](../node03/README.md)
+
+---
 
 <p align="center">
   <img
     src="https://github.com/user-attachments/assets/f5f8c727-d871-49d9-b251-bfbe17063d97"
-    alt="gateway"
+    alt="Node 02 hardware"
     width="500"
   />
 </p>
 
-***
+---
 
 ## Table of Contents
 
-1. [Overview](#overview)
-2. [Hardware](#hardware)
-3. [Source Structure](#source-structure)
-4. [Build Configuration](#build-configuration)
-5. [Main Runtime Flow](#main-runtime-flow)
-6. [LoRa Protocol](#lora-protocol)
-7. [DATA Payload](#data-payload)
-8. [Sensor Acquisition](#sensor-acquisition)
-9. [Temperature Conversion](#temperature-conversion)
-10. [Filtering](#filtering)
-11. [Sensor Diagnostics](#sensor-diagnostics)
-12. [Fault Persistence](#fault-persistence)
-13. [Cross-Sensor Validation](#cross-sensor-validation)
-14. [Timestamp and Sample Age](#timestamp-and-sample-age)
-15. [Retry and ACK Logic](#retry-and-ack-logic)
-16. [Debug Counters](#debug-counters)
-17. [Build and Flash](#build-and-flash)
-18. [Verification](#verification)
-19. [Troubleshooting](#troubleshooting)
-20. [Known Limitations](#known-limitations)
-21. [Future Improvements](#future-improvements)
+- [Overview](#overview)
+- [Hardware and Source Structure](#hardware)
+- [Runtime and LoRa Transaction](#main-runtime-flow)
+- [DATA Payload](#data-payload)
+- [Sensor Acquisition and Temperature Conversion](#sensor-acquisition)
+- [Filtering and Diagnostics](#filtering)
+- [Fault Persistence and Cross-Sensor Validation](#fault-persistence)
+- [Timestamp, Retry and ACK Logic](#timestamp-and-sample-age)
+- [Build, Verification and Debug Counters](#build-configuration)
+- [Troubleshooting and Limitations](#troubleshooting)
+- [References](#references)
 
 ***
 
 ## Overview
 
 Node 02 is the second remote acquisition node. Its sensing architecture matches Node 01, but it has its own LoRa address (`0x02`) and independent transaction state.
+
+At source level, Node 01 and Node 02 intentionally share the same `main.c`, ADC, SPI and SX1278 driver implementations; the node identity is selected by `SX1278_ADDR` in each node's `sx1278.h`. This keeps the acquisition and protocol behavior identical while preserving independent addresses.
 
 ```text
 6 × NTC
@@ -84,7 +78,7 @@ Node DATA
 Gateway ACK
 ```
 
-***
+---
 
 ## Hardware
 
@@ -154,7 +148,7 @@ Beta                : 3950 K
 Fixed resistor      : 10 kΩ
 ```
 
-***
+---
 
 ## Source Structure
 
@@ -184,7 +178,7 @@ Responsibilities:
 | `systick_driver.c/.h` | SysTick initialization |
 | `systick_utils.c/.h` | millisecond timing utilities |
 
-***
+---
 
 ## Build Configuration
 
@@ -194,25 +188,11 @@ Keil project:
 node02/MDK/Node_2.uvprojx
 ```
 
-### Important optimization requirement
+### Verified optimization setting
 
-Use:
+The committed Keil project stores its compiler optimization selection in `MDK/*.uvprojx` (`<Optim>2</Optim>` in the supplied project). Keep the committed setting when reproducing the verified firmware build.
 
-```text
-Options for Target
-→ C/C++
-→ Optimization
-→ O1
-```
-
-A practical timing issue has been observed in this project:
-
-```text
-O0 → LoRa transaction timeout/failure observed
-O1 → known-good operation
-```
-
-Therefore O1 should be treated as part of the verified build configuration, not merely a performance preference.
+A practical project observation is that dropping the firmware to an unoptimized `O0`-style build can disturb LoRa transaction timing enough to produce timeouts. For this repository, optimization is therefore part of the tested runtime configuration rather than only a code-size/performance preference.
 
 ### HEX output
 
@@ -224,9 +204,26 @@ Options for Target
 → Create HEX File
 ```
 
-***
+---
 
 ## Main Runtime Flow
+
+```mermaid
+sequenceDiagram
+    participant G as ESP32 Gateway
+    participant N as STM32 Node 0x02
+    G->>N: POLL(seq)
+    N->>N: Acquire 16-sample burst
+    N->>N: Filter + diagnose + encode 13-byte payload
+    N->>G: DATA(seq, payload)
+    alt matching ACK received
+        G-->>N: ACK(seq)
+        N->>N: Count successful transaction
+    else ACK timeout
+        N->>G: Retransmit DATA, max 3 attempts
+    end
+```
+
 
 `main()` initializes:
 
@@ -268,7 +265,7 @@ retry if necessary
 
 Unexpected packets are ignored.
 
-***
+---
 
 ## LoRa Protocol
 
@@ -316,7 +313,7 @@ The driver verifies:
 
 The radio payload CRC and application CRC-8 are separate integrity layers.
 
-***
+---
 
 ## DATA Payload
 
@@ -378,7 +375,7 @@ bit 0 sensor 1 has persistent fault
 bit 5 sensor 6 has persistent fault
 ```
 
-***
+---
 
 ## Sensor Acquisition
 
@@ -428,7 +425,7 @@ Diagnostic/filter state uses:
 SENSOR_UPDATE_MS = 1000 ms
 ```
 
-***
+---
 
 ## Temperature Conversion
 
@@ -480,7 +477,7 @@ T_calibrated = T_model × scale + offset
 
 These values should be calibrated against real reference measurements for production accuracy.
 
-***
+---
 
 ## Filtering
 
@@ -514,7 +511,7 @@ Diagnostic decisions are debounced over multiple update cycles rather than being
 
 This is a state filter for fault status rather than a signal filter.
 
-***
+---
 
 ## Sensor Diagnostics
 
@@ -559,7 +556,7 @@ Examples:
 
 The driver therefore validates electrical, mathematical and system-level consistency.
 
-***
+---
 
 ## Fault Persistence
 
@@ -605,7 +602,7 @@ Relevant functions include names in the `ADC_...` family for:
 - resistance/raw diagnostics,
 - last measurement timestamp.
 
-***
+---
 
 ## Cross-Sensor Validation
 
@@ -628,7 +625,7 @@ Cross-sensor diagnosis should be used only when the sensors are expected to meas
 
 If future deployment places sensors in intentionally different temperature zones, this rule must be redesigned or grouped by location.
 
-***
+---
 
 ## Timestamp and Sample Age
 
@@ -664,7 +661,7 @@ The gateway uses this field to reconstruct the original sample timestamp even if
 - waiting for Wi-Fi,
 - waiting for MQTT.
 
-***
+---
 
 ## Retry and ACK Logic
 
@@ -704,7 +701,7 @@ packet.len  == 0
 
 An ACK for another node or sequence is ignored.
 
-***
+---
 
 ## Debug Counters
 
@@ -736,7 +733,7 @@ A high ACK-timeout count with successful radio TX can indicate:
 - lost ACK,
 - gateway persistence failure preventing ACK.
 
-***
+---
 
 ## Build and Flash
 
@@ -773,7 +770,7 @@ If Keil cannot connect:
 - NRST if used,
 - target selection.
 
-***
+---
 
 ## Verification
 
@@ -824,7 +821,7 @@ Do not short a source or circuit in a way that can damage hardware; use controll
 
 Restore a valid sensor condition and verify the latched fault clears after five consecutive good updates.
 
-***
+---
 
 ## Troubleshooting
 
@@ -887,7 +884,7 @@ Inspect gateway logs for:
 
 The gateway intentionally will not ACK if it cannot safely persist the record.
 
-***
+---
 
 ## Known Limitations
 
@@ -902,7 +899,7 @@ The gateway intentionally will not ACK if it cannot safely persist the record.
 - Fault thresholds are compile-time constants.
 - `float` math is used for NTC conversion on STM32F103.
 
-***
+---
 
 ## Future Improvements
 
@@ -921,3 +918,15 @@ The gateway intentionally will not ACK if it cannot safely persist the record.
 13. Add unit tests for temperature conversion.
 14. Add hardware-in-the-loop radio retry tests.
 15. Add static-analysis/format checks to CI.
+
+---
+
+## References
+
+- [STMicroelectronics — STM32F103 documentation](https://www.st.com/en/microcontrollers-microprocessors/stm32f103/documentation.html)
+- [STMicroelectronics — RM0008 reference manual](https://www.st.com/resource/en/reference_manual/cd00171190.pdf)
+- [Semtech — SX1278 LoRa transceiver](https://www.semtech.com/products/wireless-rf/lora-connect/sx1278)
+
+---
+
+[← Node 01](../node01/README.md) · [↑ Root README](../README.md) · [Next: Node 03 →](../node03/README.md)

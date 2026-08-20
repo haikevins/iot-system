@@ -4,38 +4,34 @@ An end-to-end embedded IoT temperature-monitoring system built around three STM3
 
 The project is designed as more than a basic sensor demo. Its main focus is **reliable data delivery across multiple failure boundaries**: LoRa retries, gateway-side flash persistence, MQTT QoS 1, broker persistence, backend disk spooling, timestamp reconstruction, detailed sensor diagnostics, and historical visualization.
 
-***
+---
 
 ## Demo Video
 
 https://github.com/user-attachments/assets/30f4c5b5-e922-4a45-a616-c7000f7c39c6
 
-***
+Repository demo files:
+
+- [Laptop dashboard demo](docs/videos/web-demo-laptop.mp4)
+- [Responsive web/mobile demo](docs/videos/demo-web-mobile.mp4)
+
+---
 
 ## Table of Contents
 
-1. [Project Overview](#project-overview)
-2. [Main Features](#main-features)
-3. [System Architecture](#system-architecture)
-4. [Repository Structure](#repository-structure)
-5. [Hardware Overview](#hardware-overview)
-6. [End-to-End Runtime Flow](#end-to-end-runtime-flow)
-7. [LoRa Application Protocol](#lora-application-protocol)
-8. [Sensor Acquisition and Diagnostics](#sensor-acquisition-and-diagnostics)
-9. [Gateway Reliability Layer](#gateway-reliability-layer)
-10. [MQTT Broker Layer](#mqtt-broker-layer)
-11. [Backend and InfluxDB Pipeline](#backend-and-influxdb-pipeline)
-12. [Frontend Dashboard](#frontend-dashboard)
-13. [Data Model](#data-model)
-14. [Configuration and Secrets](#configuration-and-secrets)
-15. [Build and Flash](#build-and-flash)
-16. [Running the Complete System](#running-the-complete-system)
-17. [Verification and Test Checklist](#verification-and-test-checklist)
-18. [Failure Recovery](#failure-recovery)
-19. [Troubleshooting](#troubleshooting)
-20. [Security Notes](#security-notes)
-21. [Known Limitations](#known-limitations)
-22. [Future Improvements](#future-improvements)
+- [Project Overview](#project-overview)
+- [Main Features](#main-features)
+- [Documentation Map](#documentation-map)
+- [System Architecture](#system-architecture)
+- [Hardware and Embedded Nodes](#hardware-overview)
+- [End-to-End Runtime Flow](#end-to-end-runtime-flow)
+- [Protocol and Sensor Pipeline](#lora-application-protocol)
+- [Reliability Layers](#gateway-reliability-layer)
+- [Data Model](#data-model)
+- [Configuration, Build and Run](#configuration-and-secrets)
+- [Verification and Failure Recovery](#verification-and-test-checklist)
+- [Troubleshooting and Limitations](#troubleshooting)
+- [References](#references)
 
 ***
 
@@ -79,7 +75,7 @@ Store historical data
 Present system state clearly
 ```
 
-***
+---
 
 ## Main Features
 
@@ -166,7 +162,34 @@ Present system state clearly
 - Mobile hamburger navigation.
 - Persistent browser settings via `localStorage`.
 
-***
+---
+
+## Documentation Map
+
+Each first-party subsystem has a dedicated README that documents the implementation boundary it owns.
+
+| Subsystem | README | Implementation focus |
+|---|---|---|
+| Node 01 | [node01/README.md](node01/README.md) | STM32 ADC1 + DMA, six NTC channels, diagnostics, LoRa address `0x01` |
+| Node 02 | [node02/README.md](node02/README.md) | Same internal-ADC pipeline as Node 01, LoRa address `0x02` |
+| Node 03 | [node03/README.md](node03/README.md) | MCP3208 acquisition, `1.15` analog-gain compensation, LoRa address `0x03` |
+| Gateway | [gateway/README.md](gateway/README.md) | LoRa polling, LittleFS durable FIFO, NTP reconstruction, MQTT QoS 1 |
+| Broker | [broker/README.md](broker/README.md) | Mosquitto authentication, persistent sessions and persistence |
+| Backend | [backend/README.md](backend/README.md) | Validation, fsync-backed ingest spool, InfluxDB and REST API |
+| Frontend | [frontend/README.md](frontend/README.md) | React dashboard, freshness logic, faults, history and UI settings |
+
+```mermaid
+flowchart LR
+    N1["Node 01"] --> G["Gateway"]
+    N2["Node 02"] --> G
+    N3["Node 03"] --> G
+    G --> M["Mosquitto"]
+    M --> B["Backend"]
+    B --> I["InfluxDB"]
+    B --> F["Frontend"]
+```
+
+---
 
 ## System Architecture
 
@@ -185,6 +208,28 @@ flowchart LR
 ```
 
 ### Reliability chain
+
+```mermaid
+sequenceDiagram
+    participant N as STM32 Node
+    participant G as ESP32 Gateway
+    participant M as Mosquitto
+    participant B as Backend
+    participant I as InfluxDB
+    N->>G: DATA(seq, temp, faults, age)
+    G->>G: Commit + verify LittleFS record
+    G-->>N: ACK only after durable commit
+    G->>M: PUBLISH QoS 1
+    M-->>G: PUBACK
+    G->>G: Remove LittleFS record
+    M->>B: Deliver QoS 1 telemetry
+    B->>B: Atomic write + fsync pending record
+    B-->>M: Allow PUBACK after durable spool
+    B->>I: writePoint + flush
+    I-->>B: Write succeeds
+    B->>B: pending → done
+```
+
 
 The acknowledgement point is deliberately moved **after durable storage** at each important boundary.
 
@@ -224,7 +269,7 @@ Historical database
 
 This design provides **at-least-once delivery semantics with deduplication**, not mathematical exactly-once delivery. The globally unique telemetry ID and transaction sequence fields are used to make retransmission safe.
 
-***
+---
 
 ## Repository Structure
 
@@ -297,7 +342,7 @@ Component documentation:
 - [Node 02](node02/README.md)
 - [Node 03](node03/README.md)
 
-***
+---
 
 ## Hardware Overview
 
@@ -376,7 +421,7 @@ Node 03 shares SPI1 between the MCP3208 and SX1278 by using separate chip-select
 | RESET | 14 |
 | DIO0 | 26 |
 
-***
+---
 
 ## End-to-End Runtime Flow
 
@@ -493,7 +538,7 @@ done/
 /ingest-status  → durable ingestion health
 ```
 
-***
+---
 
 ## LoRa Application Protocol
 
@@ -615,7 +660,7 @@ Current node transaction timing:
 
 A retry uses the **same sequence number**, allowing the gateway to detect duplicates safely.
 
-***
+---
 
 ## Sensor Acquisition and Diagnostics
 
@@ -732,7 +777,7 @@ Fault persistence:
 
 This prevents one noisy acquisition from rapidly toggling the UI between healthy and failed states.
 
-***
+---
 
 ## Gateway Reliability Layer
 
@@ -807,7 +852,7 @@ The gateway combines:
 
 If NTP is temporarily unavailable, the telemetry can still be retained and later handled as recovered data.
 
-***
+---
 
 ## MQTT Broker Layer
 
@@ -844,7 +889,7 @@ sudo grep -RniE \
 
 See [broker/README.md](broker/README.md).
 
-***
+---
 
 ## Backend and InfluxDB Pipeline
 
@@ -931,7 +976,7 @@ The history response is designed for charting:
 
 A `null` node value represents an invalid/missing sample and is intentionally not interpolated by the frontend.
 
-***
+---
 
 ## Frontend Dashboard
 
@@ -991,7 +1036,7 @@ Available controls include:
 - temperature decimal precision,
 - chart grid.
 
-***
+---
 
 ## Data Model
 
@@ -1049,7 +1094,7 @@ Node identity is stored as a tag.
 
 Recovered records that cannot be assigned a trustworthy original sample timestamp may be separated from ordinary time-series samples instead of fabricating a timestamp.
 
-***
+---
 
 ## Configuration and Secrets
 
@@ -1123,7 +1168,7 @@ backend/data/influx-outbox/
 
 Use example files with placeholders for documentation.
 
-***
+---
 
 ## Build and Flash
 
@@ -1204,7 +1249,7 @@ npm run build
 npm run dev -- --host 0.0.0.0
 ```
 
-***
+---
 
 ## Running the Complete System
 
@@ -1272,7 +1317,7 @@ Check:
 sudo ss -ltnp | grep -E '1883|3000|5173|8086'
 ```
 
-***
+---
 
 ## Verification and Test Checklist
 
@@ -1381,7 +1426,7 @@ From another LAN device:
 http://<UBUNTU_LAN_IP>:5173
 ```
 
-***
+---
 
 ## Failure Recovery
 
@@ -1418,7 +1463,7 @@ esptool.py --chip esp32 erase_region 0x290000 0x160000
 
 **Warning:** this destroys queued gateway telemetry. Use it only when filesystem recovery is necessary and no queued data must be retained.
 
-***
+---
 
 ## Troubleshooting
 
@@ -1532,7 +1577,7 @@ Use the Ubuntu LAN address in:
 VITE_API_BASE_URL=http://<UBUNTU_LAN_IP>:3000
 ```
 
-***
+---
 
 ## Security Notes
 
@@ -1551,7 +1596,7 @@ This is a LAN-oriented engineering project. Before deploying on an untrusted net
 
 No README example should contain production passwords, Wi-Fi keys or InfluxDB tokens.
 
-***
+---
 
 ## Known Limitations
 
@@ -1566,7 +1611,7 @@ No README example should contain production passwords, Wi-Fi keys or InfluxDB to
 - The current LoRa scheduler polls nodes sequentially rather than using a dynamic network scheduler.
 - Sensor fault thresholds are engineering defaults and should be validated against final hardware.
 
-***
+---
 
 ## Future Improvements
 
@@ -1593,6 +1638,21 @@ Potential next steps:
 19. Add LoRa channel/link diagnostics over time.
 20. Add a production reverse proxy with HTTPS.
 
-***
+---
 
 This repository is intended to demonstrate the complete path from **embedded acquisition** to **reliable transport**, **durable ingestion**, **time-series storage**, and **operator-facing visualization**.
+
+---
+
+## References
+
+- [STMicroelectronics — STM32F103 documentation](https://www.st.com/en/microcontrollers-microprocessors/stm32f103/documentation.html)
+- [Semtech — SX1278 LoRa transceiver](https://www.semtech.com/products/wireless-rf/lora-connect/sx1278)
+- [Microchip — MCP3208 12-bit ADC](https://www.microchip.com/en-us/product/mcp3208)
+- [OASIS — MQTT Version 3.1.1](https://docs.oasis-open.org/mqtt/mqtt/v3.1.1/)
+- [Eclipse Mosquitto — Configuration manual](https://mosquitto.org/man/mosquitto-conf-5.html)
+- [Espressif — ESP-MQTT](https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/protocols/mqtt.html)
+- [InfluxData — JavaScript client](https://docs.influxdata.com/influxdb/v2/api-guide/client-libraries/nodejs/)
+- [React documentation](https://react.dev/)
+- [Vite documentation](https://vite.dev/guide/)
+- [Recharts documentation](https://recharts.github.io/)

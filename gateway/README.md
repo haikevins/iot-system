@@ -2,46 +2,34 @@
 
 > ESP32 gateway that polls three STM32/SX1278 nodes, validates LoRa telemetry, captures RSSI, persists records to LittleFS before acknowledging nodes, and forwards the durable queue through MQTT QoS 1.
 
-***
+[← Node 03](../node03/README.md) · [↑ Root README](../README.md) · [Next: Broker →](../broker/README.md)
+
+---
 
 <p align="center">
   <img
     src="https://github.com/user-attachments/assets/eeb2852e-a99e-4ef3-864b-aa3f68e8c030"
-    alt="gateway"
+    alt="ESP32 LoRa gateway"
     width="500"
   />
 </p>
 
-***
+---
 
 ## Table of Contents
 
-1. [Overview](#overview)
-2. [Hardware](#hardware)
-3. [Software Stack](#software-stack)
-4. [Project Structure](#project-structure)
-5. [LoRa Configuration](#lora-configuration)
-6. [Application Protocol](#application-protocol)
-7. [Polling Scheduler](#polling-scheduler)
-8. [Receiving and Deduplication](#receiving-and-deduplication)
-9. [RSSI](#rssi)
-10. [Persist-Before-ACK](#persist-before-ack)
-11. [LittleFS Outbox](#littlefs-outbox)
-12. [Persistent Record Format](#persistent-record-format)
-13. [MQTT QoS 1](#mqtt-qos-1)
-14. [Wi-Fi and Offline-First Behavior](#wi-fi-and-offline-first-behavior)
-15. [Timestamp Reconstruction](#timestamp-reconstruction)
-16. [Global Telemetry ID](#global-telemetry-id)
-17. [Legacy NVS Migration](#legacy-nvs-migration)
-18. [Partition Table](#partition-table)
-19. [Configuration and Secrets](#configuration-and-secrets)
-20. [Build Flash and Monitor](#build-flash-and-monitor)
-21. [Runtime Logs](#runtime-logs)
-22. [Reliability Tests](#reliability-tests)
-23. [Filesystem Recovery](#filesystem-recovery)
-24. [Troubleshooting](#troubleshooting)
-25. [Known Limitations](#known-limitations)
-26. [Future Improvements](#future-improvements)
+- [Overview](#overview)
+- [Hardware and Software Stack](#hardware)
+- [LoRa Protocol and Polling](#lora-configuration)
+- [Persist-Before-ACK Reliability](#persist-before-ack)
+- [LittleFS Outbox and Record Format](#littlefs-outbox)
+- [MQTT QoS 1 and Offline-First Operation](#mqtt-qos-1)
+- [Timestamp Reconstruction and Record IDs](#timestamp-reconstruction)
+- [Legacy Migration and Partitioning](#legacy-nvs-migration)
+- [Configuration and Build](#configuration-and-secrets)
+- [Reliability Tests and Recovery](#reliability-tests)
+- [Troubleshooting and Limitations](#troubleshooting)
+- [References](#references)
 
 ***
 
@@ -69,7 +57,7 @@ Second core rule:
 Never delete a durable gateway record until MQTT PUBACK confirms QoS1 acceptance.
 ```
 
-***
+---
 
 ## Hardware
 
@@ -111,7 +99,7 @@ Payload CRC        enabled
 
 The STM32 nodes must use the same modem settings.
 
-***
+---
 
 ## Software Stack
 
@@ -126,7 +114,7 @@ The STM32 nodes must use the same modem settings.
 
 The native MQTT client replaced a simpler publish-only client so the application can track the MQTT message ID and wait for the `MQTT_EVENT_PUBLISHED` event corresponding to broker PUBACK.
 
-***
+---
 
 ## Project Structure
 
@@ -156,7 +144,7 @@ lib_deps =
     sandeepmistry/LoRa
 ```
 
-***
+---
 
 ## LoRa Configuration
 
@@ -189,7 +177,7 @@ RX poll delay              5 ms
 
 These constants determine traffic cadence and duplicate handling.
 
-***
+---
 
 ## Application Protocol
 
@@ -242,7 +230,7 @@ Layout:
 
 The gateway retains compatibility with older telemetry payload versions where practical, but current nodes use the 13-byte timestamped detailed payload.
 
-***
+---
 
 ## Polling Scheduler
 
@@ -277,7 +265,7 @@ ACK
 
 into one transaction.
 
-***
+---
 
 ## Receiving and Deduplication
 
@@ -315,7 +303,7 @@ send ACK again
 
 This is required for safe at-least-once radio transport.
 
-***
+---
 
 ## RSSI
 
@@ -359,9 +347,27 @@ Pre-RSSI persistent records are allowed to have no valid RSSI.
 
 The MQTT layer can serialize these as `null` rather than pretending that `0 dBm` is a real receive measurement.
 
-***
+---
 
 ## Persist-Before-ACK
+
+```mermaid
+sequenceDiagram
+    participant N as STM32 Node
+    participant L as LoraTask
+    participant F as LittleFS Outbox
+    participant M as MqttTask
+    participant B as Broker
+    N->>L: DATA(seq)
+    L->>F: Write temp file + flush + rename + verify
+    F-->>L: Commit valid
+    L-->>N: ACK(seq)
+    M->>F: Peek oldest record
+    M->>B: PUBLISH QoS 1
+    B-->>M: PUBACK(msg_id)
+    M->>F: Pop record
+```
+
 
 This is the gateway's primary reliability invariant.
 
@@ -395,7 +401,7 @@ ACK
 
 After ACK, the STM32 may safely forget the transaction because the gateway owns a durable copy.
 
-***
+---
 
 ## LittleFS Outbox
 
@@ -444,7 +450,7 @@ delete oldest
 
 This is a FIFO-style telemetry spool.
 
-***
+---
 
 ## Persistent Record Format
 
@@ -477,7 +483,7 @@ Older NVS/file records are not blindly interpreted as the newest struct. Migrati
 
 This is essential because adding fields such as RSSI changes binary layout.
 
-***
+---
 
 ## MQTT QoS 1
 
@@ -541,7 +547,7 @@ Topic:
 iot/nodeXX/telemetry
 ```
 
-***
+---
 
 ## Wi-Fi and Offline-First Behavior
 
@@ -583,7 +589,7 @@ Representative Wi-Fi reconnect interval:
 5000 ms
 ```
 
-***
+---
 
 ## Timestamp Reconstruction
 
@@ -626,7 +632,7 @@ The gateway treats dates from 2024 onward as a threshold for plausible synchroni
 
 Network time synchronization is background functionality, not a prerequisite for accepting LoRa DATA.
 
-***
+---
 
 ## Global Telemetry ID
 
@@ -645,7 +651,7 @@ Properties:
 
 This ID is used by the backend for idempotency/deduplication.
 
-***
+---
 
 ## Legacy NVS Migration
 
@@ -677,7 +683,7 @@ new filesystem outbox
 
 Operational telemetry no longer relies on the small legacy NVS ring.
 
-***
+---
 
 ## Partition Table
 
@@ -703,7 +709,7 @@ Approximate size:
 
 The OTA partitions allow two application slots.
 
-***
+---
 
 ## Configuration and Secrets
 
@@ -734,7 +740,7 @@ Use the exact macro names expected by the current source/example file.
 
 When Ubuntu LAN IP changes, update the gateway MQTT broker address and rebuild/flash.
 
-***
+---
 
 ## Build Flash and Monitor
 
@@ -785,7 +791,7 @@ pio device monitor \
   --baud 115200
 ```
 
-***
+---
 
 ## Runtime Logs
 
@@ -817,7 +823,7 @@ A pause after identity/filesystem logs does not automatically mean deadlock.
 
 Observe serial output before resetting the gateway repeatedly.
 
-***
+---
 
 ## Reliability Tests
 
@@ -873,7 +879,7 @@ Verify new messages contain:
 "rssiDbm": -xx
 ```
 
-***
+---
 
 ## Filesystem Recovery
 
@@ -893,7 +899,7 @@ This command erases the persistent gateway telemetry backlog.
 
 Do not use it merely to “clean” a working device.
 
-***
+---
 
 ## Troubleshooting
 
@@ -954,7 +960,7 @@ Investigate why MQTT/backend recovery is not occurring.
 
 Do not solve a persistent network outage by simply raising `FILE_OUTBOX_MAX_RECORDS` without capacity planning.
 
-***
+---
 
 ## Known Limitations
 
@@ -968,7 +974,7 @@ Do not solve a persistent network outage by simply raising `FILE_OUTBOX_MAX_RECO
 - OTA partitioning exists, but a complete secure OTA management workflow is not documented.
 - Polling cadence is fixed rather than adaptive.
 
-***
+---
 
 ## Future Improvements
 
@@ -987,3 +993,17 @@ Do not solve a persistent network outage by simply raising `FILE_OUTBOX_MAX_RECO
 13. Hardware-in-the-loop ACK/retry tests.
 14. Dynamic channel/frequency configuration where legally appropriate.
 15. Secure provisioning flow for Wi-Fi/MQTT secrets.
+
+---
+
+## References
+
+- [Espressif — ESP-MQTT](https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/protocols/mqtt.html)
+- [Espressif — ESP32 Arduino Core](https://docs.espressif.com/projects/arduino-esp32/en/latest/)
+- [Semtech — SX1278 LoRa transceiver](https://www.semtech.com/products/wireless-rf/lora-connect/sx1278)
+- [OASIS — MQTT Version 3.1.1](https://docs.oasis-open.org/mqtt/mqtt/v3.1.1/)
+- [PlatformIO — Project Configuration](https://docs.platformio.org/en/latest/projectconf/index.html)
+
+---
+
+[← Node 03](../node03/README.md) · [↑ Root README](../README.md) · [Next: Broker →](../broker/README.md)

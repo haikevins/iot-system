@@ -2,31 +2,22 @@
 
 > Durable Node.js ingestion service that receives MQTT QoS 1 telemetry, validates it, commits it to a local disk outbox, writes time-series points to InfluxDB, and exposes REST APIs consumed by the IoT System dashboard.
 
-***
+[← Broker](../broker/README.md) · [↑ Root README](../README.md) · [Next: Frontend →](../frontend/README.md)
+
+---
 
 ## Table of Contents
 
-1. [Overview](#overview)
-2. [Responsibilities](#responsibilities)
-3. [Architecture](#architecture)
-4. [Directory Structure](#directory-structure)
-5. [Dependencies](#dependencies)
-6. [Environment Configuration](#environment-configuration)
-7. [MQTT Session Design](#mqtt-session-design)
-8. [Telemetry Validation](#telemetry-validation)
-9. [Durable Ingestion Outbox](#durable-ingestion-outbox)
-10. [InfluxDB Write Path](#influxdb-write-path)
-11. [InfluxDB Data Model](#influxdb-data-model)
-12. [REST API](#rest-api)
-13. [History Query](#history-query)
-14. [RSSI Support](#rssi-support)
-15. [Startup and Shutdown](#startup-and-shutdown)
-16. [Testing](#testing)
-17. [Failure Scenarios](#failure-scenarios)
-18. [Troubleshooting](#troubleshooting)
-19. [Security](#security)
-20. [Performance and Retention](#performance-and-retention)
-21. [Future Improvements](#future-improvements)
+- [Overview](#overview)
+- [Architecture and Responsibilities](#architecture)
+- [Configuration](#environment-configuration)
+- [MQTT Ingestion Contract](#mqtt-session-design)
+- [Validation and Durable Outbox](#telemetry-validation)
+- [InfluxDB Write Path and Data Model](#influxdb-write-path)
+- [REST API](#rest-api)
+- [Runtime, Testing and Failure Scenarios](#startup-and-shutdown)
+- [Troubleshooting and Operations](#troubleshooting)
+- [References](#references)
 
 ***
 
@@ -54,7 +45,7 @@ until its normalized telemetry record is durably written to local disk.
 
 That allows the backend to continue acknowledging broker traffic even when InfluxDB is temporarily unavailable, without losing accepted telemetry.
 
-***
+---
 
 ## Responsibilities
 
@@ -79,7 +70,7 @@ The backend performs the following jobs:
 17. Query InfluxDB history for the frontend.
 18. Preserve RSSI and sample timestamp semantics.
 
-***
+---
 
 ## Architecture
 
@@ -126,7 +117,7 @@ Poison data is isolated:
 invalid/unsupported disk record → rejected/
 ```
 
-***
+---
 
 ## Directory Structure
 
@@ -149,7 +140,7 @@ backend/
 
 The `data/influx-outbox` directory is runtime state and should not be committed.
 
-***
+---
 
 ## Dependencies
 
@@ -173,7 +164,7 @@ Project script:
 }
 ```
 
-***
+---
 
 ## Environment Configuration
 
@@ -230,9 +221,26 @@ INGEST_DONE_MAX_ENTRIES=20000
 
 Never commit `.env`.
 
-***
+---
 
 ## MQTT Session Design
+
+```mermaid
+sequenceDiagram
+    participant M as Mosquitto
+    participant B as MQTT.js Backend
+    participant D as Disk Outbox
+    participant I as InfluxDB
+    M->>B: PUBLISH QoS 1
+    B->>B: Parse + validate
+    B->>D: temp write → fsync → rename → dir fsync
+    D-->>B: Durable pending record
+    B-->>M: handleMessage callback → PUBACK
+    B->>I: writePoint + flush
+    I-->>B: Success
+    B->>D: pending → done
+```
+
 
 The backend uses a stable client identity:
 
@@ -297,7 +305,7 @@ only now can MQTT acknowledgement complete
 
 This means a backend process crash before disk persistence causes the broker to redeliver rather than silently losing the message.
 
-***
+---
 
 ## Telemetry Validation
 
@@ -361,7 +369,7 @@ The broad range is for validation robustness; real SX1278 receive values are nor
 
 Pre-RSSI telemetry can omit/contain no RSSI and remains backward compatible.
 
-***
+---
 
 ## Durable Ingestion Outbox
 
@@ -433,7 +441,7 @@ rejected should remain zero
 
 unless intentionally testing malformed data.
 
-***
+---
 
 ## InfluxDB Write Path
 
@@ -471,7 +479,7 @@ Do not configure the Influx client with an effective zero retry-time budget that
 
 The backend already has a durable application-level retry loop. Let the write request execute, then let the worker decide when to retry after a real failure.
 
-***
+---
 
 ## InfluxDB Data Model
 
@@ -507,7 +515,7 @@ The measurement timestamp should represent the actual sample time when it can be
 
 A recovered record without a trustworthy original sample timestamp should not be inserted into the normal time axis with a fabricated current time.
 
-***
+---
 
 ## REST API
 
@@ -610,7 +618,7 @@ Test:
 curl -s http://127.0.0.1:3000/ingest-status | jq
 ```
 
-***
+---
 
 ## History Query
 
@@ -656,7 +664,7 @@ found unexpected argument ...
 missing required argument r
 ```
 
-***
+---
 
 ## RSSI Support
 
@@ -684,7 +692,7 @@ This is the correct location to measure RSSI because the ESP32/SX1278 gateway is
 
 No STM32 payload byte is required for RSSI.
 
-***
+---
 
 ## Startup and Shutdown
 
@@ -725,7 +733,7 @@ Ctrl+C
 
 For production, run the backend under a service manager such as systemd rather than an interactive terminal.
 
-***
+---
 
 ## Testing
 
@@ -780,7 +788,7 @@ find data/influx-outbox -maxdepth 2 -type f | sort | head -50
 curl -fsS http://127.0.0.1:8086/health | jq
 ```
 
-***
+---
 
 ## Failure Scenarios
 
@@ -831,7 +839,7 @@ tempValid=false but an application path treats temp as valid
 
 The backend must preserve invalidity semantics instead of substituting zero.
 
-***
+---
 
 ## Troubleshooting
 
@@ -889,7 +897,7 @@ sudo ss -ltnp | grep 3000
 
 Check process output and `PORT`.
 
-***
+---
 
 ## Security
 
@@ -903,7 +911,7 @@ Check process output and `PORT`.
 - Treat `done/`, `pending/` and `rejected/` telemetry as potentially sensitive operational data.
 - Apply filesystem permissions so only the backend service account can modify the outbox.
 
-***
+---
 
 ## Performance and Retention
 
@@ -926,7 +934,7 @@ For longer deployments consider:
 - service-level alerts when pending grows,
 - moving runtime data to a dedicated filesystem if telemetry volume grows substantially.
 
-***
+---
 
 ## Future Improvements
 
@@ -945,3 +953,18 @@ For longer deployments consider:
 13. Add long-term RSSI/SNR history endpoints.
 14. Add automated Influx bucket retention/downsampling setup.
 15. Add Docker-based local integration environment.
+
+---
+
+## References
+
+- [MQTT Version 3.1.1 — QoS 1](https://docs.oasis-open.org/mqtt/mqtt/v3.1.1/)
+- [MQTT.js](https://github.com/mqttjs/MQTT.js)
+- [Node.js File System API](https://nodejs.org/api/fs.html)
+- [Express](https://expressjs.com/)
+- [InfluxDB JavaScript client](https://docs.influxdata.com/influxdb/v2/api-guide/client-libraries/nodejs/)
+- [InfluxDB Flux](https://docs.influxdata.com/flux/)
+
+---
+
+[← Broker](../broker/README.md) · [↑ Root README](../README.md) · [Next: Frontend →](../frontend/README.md)

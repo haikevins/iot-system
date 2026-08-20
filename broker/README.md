@@ -2,27 +2,22 @@
 
 > Eclipse Mosquitto configuration and operational guide for the IoT System MQTT transport layer, with authentication, QoS 1 delivery and disk persistence.
 
-***
+[← Gateway](../gateway/README.md) · [↑ Root README](../README.md) · [Next: Backend →](../backend/README.md)
+
+---
 
 ## Table of Contents
 
-1. [Overview](#overview)
-2. [Role in the Reliability Chain](#role-in-the-reliability-chain)
-3. [Directory Structure](#directory-structure)
-4. [Installation](#installation)
-5. [Listener and Authentication](#listener-and-authentication)
-6. [Persistence](#persistence)
-7. [Persistent Sessions and QoS 1](#persistent-sessions-and-qos-1)
-8. [Recommended Configuration](#recommended-configuration)
-9. [Password Management](#password-management)
-10. [Firewall](#firewall)
-11. [Service Management](#service-management)
-12. [Testing](#testing)
-13. [Persistence Verification](#persistence-verification)
-14. [Failure Tests](#failure-tests)
-15. [Troubleshooting](#troubleshooting)
-16. [Security](#security)
-17. [Future Improvements](#future-improvements)
+- [Overview](#overview)
+- [Role in the Reliability Chain](#role-in-the-reliability-chain)
+- [Installation and Listener Configuration](#installation)
+- [Authentication and Password Management](#listener-and-authentication)
+- [Persistence and QoS 1](#persistence)
+- [Recommended Configuration](#recommended-configuration)
+- [Operations and Verification](#service-management)
+- [Failure Tests](#failure-tests)
+- [Troubleshooting and Security](#troubleshooting)
+- [References](#references)
 
 ***
 
@@ -52,9 +47,22 @@ When correctly configured, it provides:
 - persistent backend session support,
 - queued traffic during temporary subscriber outages.
 
-***
+---
 
 ## Role in the Reliability Chain
+
+```mermaid
+sequenceDiagram
+    participant G as ESP32 Gateway
+    participant M as Mosquitto
+    participant B as Backend
+    G->>M: PUBLISH QoS 1
+    M-->>G: PUBACK after broker accepts ownership
+    M->>B: PUBLISH QoS 1
+    Note over M,B: Persistent session allows queued delivery across reconnects
+    B-->>M: PUBACK after backend durable spool
+```
+
 
 The full chain is:
 
@@ -92,7 +100,7 @@ allow acknowledgement
 
 The broker is therefore the transport boundary between two durable stores.
 
-***
+---
 
 ## Directory Structure
 
@@ -115,7 +123,7 @@ Typical host files:
 
 The repository snippet is a reference. The actual Ubuntu configuration may already define some of the same settings.
 
-***
+---
 
 ## Installation
 
@@ -151,7 +159,7 @@ Inspect detailed status:
 sudo systemctl status mosquitto --no-pager -l
 ```
 
-***
+---
 
 ## Listener and Authentication
 
@@ -183,7 +191,7 @@ The gateway publishes operational sensor data. Even on a development LAN, requir
 - reduces spoofed node telemetry,
 - establishes a clean path toward ACL/TLS hardening.
 
-***
+---
 
 ## Persistence
 
@@ -255,7 +263,7 @@ Then either:
 
 but not both.
 
-***
+---
 
 ## Persistent Sessions and QoS 1
 
@@ -304,7 +312,7 @@ With persistence, the broker has a better chance of restoring that state after r
 
 This does not replace gateway LittleFS or backend disk persistence; each layer protects a different failure window.
 
-***
+---
 
 ## Recommended Configuration
 
@@ -334,7 +342,7 @@ mosquitto -c /etc/mosquitto/mosquitto.conf -v
 
 Run this carefully: an existing system service may already own port 1883. For syntax-only workflow, use service logs after restart if needed.
 
-***
+---
 
 ## Password Management
 
@@ -372,7 +380,7 @@ backend/.env
 
 Never put the real password in Git or README examples.
 
-***
+---
 
 ## Firewall
 
@@ -396,7 +404,7 @@ Check listener:
 sudo ss -ltnp | grep 1883
 ```
 
-***
+---
 
 ## Service Management
 
@@ -436,7 +444,7 @@ Follow logs:
 sudo journalctl -u mosquitto -f
 ```
 
-***
+---
 
 ## Testing
 
@@ -489,7 +497,7 @@ Clean the temporary shell variable:
 unset MQTT_PASS
 ```
 
-***
+---
 
 ## Persistence Verification
 
@@ -526,7 +534,7 @@ sudo systemctl restart mosquitto
 systemctl is-active mosquitto
 ```
 
-***
+---
 
 ## Failure Tests
 
@@ -572,7 +580,7 @@ Verify:
 - gateway reconnects,
 - no unrecoverable queue error is reported.
 
-***
+---
 
 ## Troubleshooting
 
@@ -627,7 +635,7 @@ Check:
 
 This is likely a gateway-side MQTT message-ID/PUBACK matching issue rather than Mosquitto persistence. Inspect gateway serial logs.
 
-***
+---
 
 ## Security
 
@@ -652,7 +660,7 @@ gateway user → write iot/node+/telemetry
 backend user → read  iot/+/telemetry
 ```
 
-***
+---
 
 ## Future Improvements
 
@@ -666,3 +674,15 @@ backend user → read  iot/+/telemetry
 8. Message/session expiry policy review.
 9. Capacity testing with extended gateway backlog.
 10. Alert when broker persistence file cannot be written.
+
+---
+
+## References
+
+- [Eclipse Mosquitto — mosquitto.conf manual](https://mosquitto.org/man/mosquitto-conf-5.html)
+- [Eclipse Mosquitto — mosquitto_passwd](https://mosquitto.org/man/mosquitto_passwd-1.html)
+- [MQTT Version 3.1.1](https://docs.oasis-open.org/mqtt/mqtt/v3.1.1/)
+
+---
+
+[← Gateway](../gateway/README.md) · [↑ Root README](../README.md) · [Next: Backend →](../backend/README.md)
