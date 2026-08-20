@@ -10,11 +10,6 @@ The project is designed as more than a basic sensor demo. Its main focus is **re
 
 https://github.com/user-attachments/assets/30f4c5b5-e922-4a45-a616-c7000f7c39c6
 
-Repository demo files:
-
-- [Laptop dashboard demo](docs/videos/web-demo-laptop.mp4)
-- [Responsive web/mobile demo](docs/videos/demo-web-mobile.mp4)
-
 ---
 
 ## Table of Contents
