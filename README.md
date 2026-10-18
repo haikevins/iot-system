@@ -37,23 +37,30 @@ The project focuses on one problem beyond basic telemetry: **preserving sensor d
 ## System Architecture
 
 ```mermaid
-flowchart LR
-    N1["STM32 Node 01<br/>6 × NTC · ADC1 + DMA"]
-    N2["STM32 Node 02<br/>6 × NTC · ADC1 + DMA"]
-    N3["STM32 Node 03<br/>6 × NTC · MCP3208"]
-    G["ESP32 Gateway<br/>LoRa · LittleFS"]
-    M["Mosquitto<br/>MQTT QoS 1"]
-    B["Node.js Backend<br/>Durable Ingestion Spool"]
-    I["InfluxDB<br/>Time-Series Storage"]
-    F["React Dashboard<br/>REST API"]
+flowchart TB
+    subgraph SENSOR_NODES["STM32 Sensor Nodes"]
+        direction LR
 
-    N1 -->|LoRa 433 MHz| G
-    N2 -->|LoRa 433 MHz| G
-    N3 -->|LoRa 433 MHz| G
-    G -->|MQTT| M
-    M --> B
-    B --> I
-    B -->|REST| F
+        N1["STM32 Node 01<br/>6 × NTC<br/>ADC1 + DMA"]
+        N2["STM32 Node 02<br/>6 × NTC<br/>ADC1 + DMA"]
+        N3["STM32 Node 03<br/>6 × NTC<br/>MCP3208"]
+    end
+
+    GW["ESP32 Gateway<br/>LoRa · LittleFS"]
+    MQTT["Mosquitto<br/>MQTT QoS 1"]
+    BACKEND["Node.js Backend<br/>Durable Ingestion Spool"]
+    DB["InfluxDB<br/>Time-Series Storage"]
+    DASH["React Dashboard<br/>REST API"]
+
+    N1 -->|"LoRa 433 MHz"| GW
+    N2 -->|"LoRa 433 MHz"| GW
+    N3 -->|"LoRa 433 MHz"| GW
+
+    GW -->|"MQTT"| MQTT
+    MQTT --> BACKEND
+
+    BACKEND --> DB
+    BACKEND -->|"REST"| DASH
 ```
 
 The system is intentionally split into independently documented layers so that sensing, transport, persistence, storage, and presentation can be reasoned about separately.
