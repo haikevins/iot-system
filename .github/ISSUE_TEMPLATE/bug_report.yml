@@ -1,0 +1,71 @@
+name: Bug report
+description: Report a reproducible problem in the IoT system
+title: "bug: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a problem. Do not include passwords, tokens, Wi-Fi credentials, or other secrets.
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Which part of the system is affected?
+      options:
+        - Node 01
+        - Node 02
+        - Node 03
+        - ESP32 gateway
+        - MQTT broker
+        - Backend
+        - Frontend
+        - Documentation / repository
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Problem description
+      description: Explain what happened and what you expected instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: Provide the smallest reliable sequence that reproduces the problem.
+      placeholder: |
+        1. Start ...
+        2. Configure ...
+        3. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include relevant board, toolchain, OS, browser, broker/database version, or network details.
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Logs or evidence
+      description: Add sanitized logs, screenshots, serial output, or packet traces if useful. Remove secrets first.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-submission checks
+      options:
+        - label: I searched existing issues for the same problem.
+          required: true
+        - label: I removed passwords, tokens, Wi-Fi credentials, and other secrets from the report.
+          required: true

@@ -1,1 +1,34 @@
+# Runtime data
 backend/data/influx-outbox/
+
+# Environment and local secrets
+.env
+.env.*
+!.env.example
+!**/.env.example
+**/secrets.h
+
+# Dependency and build output
+**/node_modules/
+**/dist/
+**/.pio/
+
+# Logs and temporary files
+*.log
+*.tmp
+*.bak
+*.swp
+*.swo
+*~
+
+# OS and editor metadata
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+!gateway/.vscode/
+!gateway/.vscode/extensions.json
+
+# Keil µVision per-user GUI state
+*.uvguix
+*.uvguix.*
