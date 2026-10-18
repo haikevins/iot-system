@@ -8,6 +8,7 @@ The project focuses on one problem beyond basic telemetry: **preserving sensor d
   <a href="https://github.com/haikevins/iot-system/actions/workflows/ci.yml"><img src="https://github.com/haikevins/iot-system/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <img src="https://img.shields.io/badge/ESP32-PlatformIO-orange" alt="PlatformIO">
   <img src="https://img.shields.io/badge/UI-React-61DAFB" alt="React">
+  <a href="https://github.com/haikevins/iot-system/releases/latest"><img src="https://img.shields.io/github/v/release/haikevins/iot-system?display_name=tag&sort=semver" alt="Release"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License"></a>
 </p>
 
@@ -209,6 +210,8 @@ Start with the project-level index, then move to the subsystem that owns the beh
 |---|---|
 | [Documentation index](docs/README.md) | Entry point for project and subsystem documentation |
 | [System technical reference](docs/system-reference.md) | End-to-end flow, protocol, reliability, configuration, recovery, troubleshooting |
+| [Changelog](CHANGELOG.md) | Stable release history and verification notes |
+| [v1.0.0 release notes](docs/releases/v1.0.0.md) | First stable release scope, assets, verification, and limitations |
 | [Node 01](node01/README.md) | Internal ADC + DMA sensing pipeline, diagnostics, LoRa address `0x01` |
 | [Node 02](node02/README.md) | Internal ADC + DMA sensing pipeline, diagnostics, LoRa address `0x02` |
 | [Node 03](node03/README.md) | MCP3208 sensing pipeline, calibration, diagnostics, LoRa address `0x03` |

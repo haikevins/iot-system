@@ -8,6 +8,8 @@ This directory contains project-level documentation and media. Detailed implemen
 |---|---|
 | [Project README](../README.md) | Portfolio-oriented overview, architecture, reliability, quick start, and demo |
 | [System Technical Reference](system-reference.md) | Detailed end-to-end protocol, reliability, configuration, runtime, recovery, verification, and troubleshooting |
+| [v1.0.0 Release Notes](releases/v1.0.0.md) | Scope, reliability highlights, verification, assets, and limitations for the first stable release |
+| [Release Checklist](release-checklist.md) | Repeatable tagging, packaging, checksum, and GitHub Release procedure |
 | [Node 01](../node01/README.md) | STM32 internal-ADC sensing node |
 | [Node 02](../node02/README.md) | STM32 internal-ADC sensing node |
 | [Node 03](../node03/README.md) | STM32 MCP3208 sensing node |
