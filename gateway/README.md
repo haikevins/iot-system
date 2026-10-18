@@ -130,11 +130,11 @@ gateway/
     └── main.cpp
 ```
 
-Key PlatformIO configuration:
+Key PlatformIO configuration (pinned to pioarduino Arduino-ESP32 3.3.11 / ESP-IDF 5.5.5 for reproducible builds):
 
 ```ini
 [env:nodemcu-32s]
-platform = espressif32
+platform = https://github.com/pioarduino/platform-espressif32/releases/download/55.03.311/platform-espressif32.zip
 board = nodemcu-32s
 framework = arduino
 monitor_speed = 115200

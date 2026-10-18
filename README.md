@@ -5,6 +5,13 @@ An end-to-end embedded IoT temperature-monitoring system built with **STM32**, *
 The project focuses on one problem beyond basic telemetry: **preserving sensor data across real failure boundaries**. Measurements can survive LoRa retries, Wi-Fi or MQTT outages, gateway reboots, broker restarts, backend interruption, and temporary InfluxDB unavailability through layered acknowledgement and durable buffering.
 
 <p align="center">
+  <a href="https://github.com/haikevins/iot-system/actions/workflows/ci.yml"><img src="https://github.com/haikevins/iot-system/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <img src="https://img.shields.io/badge/ESP32-PlatformIO-orange" alt="PlatformIO">
+  <img src="https://img.shields.io/badge/UI-React-61DAFB" alt="React">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License"></a>
+</p>
+
+<p align="center">
   <img src="docs/images/dashboard-dark.jpg" alt="IoT System dashboard" width="920">
 </p>
 
@@ -223,7 +230,16 @@ Repository media also includes:
 
 ## Verification
 
-The repository documents verification at both subsystem and end-to-end levels, including:
+GitHub Actions provides four automated gates on every push and pull request:
+
+| Gate | Automated check |
+|---|---|
+| Repository Hygiene | Reject tracked local `.env`, `secrets.h`, and Keil per-user `*.uvguix*` files; require configuration templates |
+| Backend | `npm ci` and JavaScript syntax validation |
+| Frontend | `npm ci`, ESLint, and production Vite build |
+| Gateway | ESP32 PlatformIO build using the committed `secrets.example.h` template |
+
+The STM32 firmware remains a **manual Keil MDK verification boundary** because the current node projects use the Keil toolchain and target hardware rather than a reproducible open-source CI toolchain. The repository also documents end-to-end verification for:
 
 - LoRa response and retry behavior.
 - Gateway queue persistence across MQTT/Wi-Fi outages and reboot.
